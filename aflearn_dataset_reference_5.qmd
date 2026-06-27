@@ -1,0 +1,1040 @@
+---
+title: ""
+format:
+  html:
+    self-contained: true
+    output-file: index.html
+    toc: false
+    theme: none
+    include-in-header:
+      text: |
+        <link rel="preconnect" href="https://fonts.googleapis.com">
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link href="https://fonts.googleapis.com/css2?family=Nunito:ital,wght@0,400;0,600;0,700;0,800;1,400&display=swap" rel="stylesheet">
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r setup}
+library(readxl)
+library(reactable)
+library(htmltools)
+library(dplyr)
+library(stringr)
+library(glue)
+library(crosstalk)
+library(tidyr)
+library(htmlwidgets)
+library(jsonlite)
+
+`%||%` <- function(x, y) if (is.null(x) || length(x) == 0 || (length(x) == 1 && is.na(x))) y else x
+
+EXCEL_CANDIDATES <- c(
+  "EGRA_Harmonization_Waves_Details.xlsx",
+  file.path("data", "EGRA_Harmonization_Waves_Details.xlsx")
+)
+EXCEL_PATH <- EXCEL_CANDIDATES[file.exists(EXCEL_CANDIDATES)][1]
+
+PUBLISH_DIR <- Sys.getenv("AFLEARN_PUBLISH_DIR", unset = "docs")
+STUDIES_DIR <- file.path(PUBLISH_DIR, "studies")
+dir.create(STUDIES_DIR, recursive = TRUE, showWarnings = FALSE)
+
+HARMONISED_DATA_URL <- "https://www.datafirst.uct.ac.za/dataportal/index.php"
+AF_NAVY_L1 <- "#080056"  # logo bar (darkest layer)
+AF_NAVY_L2 <- "#100A78"  # header / hero (lighter navy)
+AF_NAVY    <- "#06003E"  # body text / accents
+AF_GOLD    <- "#C8892A"
+AF_BLUE    <- "#1B6FD8"
+
+format_grades <- function(sheet_val, file_val = NA_character_) {
+  if (!is.na(sheet_val) && sheet_val != "") {
+    val <- tolower(trimws(as.character(sheet_val)))
+    m <- str_match_all(val, "g(\\d+)")[[1]]
+    if (nrow(m) > 0) {
+      nums <- sort(unique(as.integer(m[, 2])))
+      return(paste(nums, collapse = ", "))
+    }
+  }
+  from_file <- grades_from_filename(file_val)
+  if (!is.na(from_file) && from_file != "") {
+    return(normalize_grades(from_file))
+  }
+  "—"
+}
+
+grades_from_filename <- function(text) {
+  if (is.na(text) || text == "" || text == "—") return(NA_character_)
+  m <- str_match(text, "(?i)grades?[_ ]+([0-9]+(?:[,\\s]+[0-9]+)*)")
+  if (!is.na(m[1, 2])) return(m[1, 2])
+  m2 <- str_match_all(text, "(?i)grade[_ ]?(\\d+)")[[1]]
+  if (nrow(m2) > 0) return(paste(m2[, 2], collapse = ", "))
+  NA_character_
+}
+
+normalize_grades <- function(...) {
+  vals <- list(...)
+  vals <- vals[!vapply(vals, function(x) is.na(x) || x == "", logical(1))]
+  if (length(vals) == 0) return("—")
+  nums <- unique(sort(as.integer(unlist(str_split(paste(vals, collapse = " "), "[,\\s]+")))))
+  nums <- nums[!is.na(nums)]
+  if (length(nums) == 0) return("—")
+  paste(nums, collapse = ", ")
+}
+
+study_type_label <- function(val) {
+  switch(val,
+    cross_sectional = "Cross-sectional",
+    school_panel    = "School panel",
+    unknown         = "Unknown",
+    ifelse(is.na(val) || val == "", "Unknown", val)
+  )
+}
+
+# ── DataLumos project-level URLs (readxl strips hyperlinks; recovered via openpyxl) ──
+# Key: paste0(ISO, "_", zero-padded project code)
+# Add new entries here as datasets are deposited.
+datalumos_urls <- c(
+  "CD_001" = "http://doi.org/10.3886/E237081V1",
+  "KE_001" = "https://www.datalumos.org/datalumos/project/237644/version/V1/view?path=/datalumos/237644/fcr:versions/V1/Kenya/Tusome&type=folder",
+  "LR_001" = "https://www.datalumos.org/datalumos/project/237226/version/V1/view?path=/datalumos/237226/fcr:versions/V1/Liberia/EGRA-Plus&type=folder",
+  "MW_001" = "https://www.datalumos.org/datalumos/project/237426/version/V1/view?path=/datalumos/237426/fcr:versions/V1/Malawi/Malawi-Teacher-Professional-Development-Support--MTPDS----Intervention-Study/MTPDS&type=folder",
+  "RW_002" = "https://www.datalumos.org/datalumos/project/237672/version/V1/view?path=/datalumos/237672/fcr:versions/V1/Rwanda/Soma-Umenye--Read-to-Know-&type=folder",
+  "RW_003" = "https://www.datalumos.org/datalumos/project/237672/version/V1/view?path=/datalumos/237672/fcr:versions/V1/Rwanda/The-Literacy-Language-and-Learning-Initiative--L3-&type=folder"
+)
+
+# ── Data file URLs keyed on source identifier ──────────────────────────────────
+datafile_urls <- c(
+  "drc_2015"      = "https://www.datalumos.org/datalumos/project/237081/version/V1/view?path=/datalumos/237081/fcr:versions/V1/Democratic-Republic-of-the-Congo/Acces--Lecture--Redevabilite-et-Retention--Activity-1--A-1--Project/Data/Baseline-2015-Grades-3-5-EGRA.csv&type=file",
+  "kenya_2015"    = "https://www.datalumos.org/datalumos/project/237644/version/V1/view?path=/datalumos/237644/fcr:versions/V1/Kenya/Tusome/early-grade-reading-program/Data/2015-Baseline-Student-Teacher-Headteacher.csv&type=file",
+  "kenya_2016"    = "https://www.datalumos.org/datalumos/project/237644/version/V1/view?path=/datalumos/237644/fcr:versions/V1/Kenya/Tusome/endline-evaluation/Data/Tusome_EGRA_Panel_Dataset.csv&type=file",
+  "kenya_2019"    = "https://www.datalumos.org/datalumos/project/237644/version/V1/view?path=/datalumos/237644/fcr:versions/V1/Kenya/Tusome/endline-evaluation/Data/2._Tusome_Endline_Student_Level_DDL_Dataset.csv&type=file",
+  "liberia"       = "https://www.datalumos.org/datalumos/project/237226/version/V1/view?path=/datalumos/237226/fcr:versions/V1/Liberia/EGRA-Plus/Data/2008-2010-Baseline-Midline-Endline.csv&type=file",
+  "malawi"        = "https://www.datalumos.org/datalumos/project/237426/version/V1/view?path=/datalumos/237426/fcr:versions/V1/Malawi/Malawi-Teacher-Professional-Development-Support--MTPDS----Intervention-Study/MTPDS/Data/PUF-Data_Malawi_MTPDS_Baseline.csv&type=file",
+  "rwanda_2018_g1"= "https://www.datalumos.org/datalumos/project/237672/version/V1/view?path=/datalumos/237672/fcr:versions/V1/Rwanda/Soma-Umenye--Read-to-Know-/2018-baseline/Data/Grade_1_EGRA_data__Soma_Umenye_2018_baseline_.csv&type=file",
+  "rwanda_2018_g2"= "https://www.datalumos.org/datalumos/project/237672/version/V1/view?path=/datalumos/237672/fcr:versions/V1/Rwanda/Soma-Umenye--Read-to-Know-/2018-baseline/Data/Grade_2_EGRA_data__Soma_Umenye_2018_baseline_.csv&type=file",
+  "rwanda_2018_g3"= "https://www.datalumos.org/datalumos/project/237672/version/V1/view?path=/datalumos/237672/fcr:versions/V1/Rwanda/Soma-Umenye--Read-to-Know-/2018-baseline/Data/Grade_3_EGRA_data__Soma_Umenye_2018_baseline_.csv&type=file",
+  "rwanda_2014"   = "https://www.datalumos.org/datalumos/project/237672/version/V1/view?path=/datalumos/237672/fcr:versions/V1/Rwanda/The-Literacy-Language-and-Learning-Initiative--L3-/Data/PUF-Data_Rwanda_L3_Baseline.csv&type=file",
+  "rwanda_2015"   = "https://www.datalumos.org/datalumos/project/237672/version/V1/view?path=/datalumos/237672/fcr:versions/V1/Rwanda/The-Literacy-Language-and-Learning-Initiative--L3-/Data/PUF-Data_Rwanda_L3_Midline-1.csv&type=file",
+  "rwanda_2016"   = "https://www.datalumos.org/datalumos/project/237672/version/V1/view?path=/datalumos/237672/fcr:versions/V1/Rwanda/The-Literacy-Language-and-Learning-Initiative--L3-/Data/PUF-Data_Rwanda_L3_Endline.csv&type=file"
+)
+
+# ── Codebook URLs keyed on source identifier ───────────────────────────────────
+codebook_urls <- c(
+  "drc_2015"      = "https://www.datalumos.org/datalumos/project/237081/version/V1/view?path=/datalumos/237081/fcr:versions/V1/Democratic-Republic-of-the-Congo/Acces--Lecture--Redevabilite-et-Retention--Activity-1--A-1--Project/Codebooks/Baseline-2015-Grades-3-5-EGR-Codebook.xlsx&type=file",
+  "kenya_2015"    = "https://www.datalumos.org/datalumos/project/237644/version/V1/view?path=/datalumos/237644/fcr:versions/V1/Kenya/Tusome/early-grade-reading-program/Codebooks/codebook_2015-Kenya-Tusome-baseline.csv&type=file",
+  "kenya_2016"    = "https://www.datalumos.org/datalumos/project/237644/version/V1/view?path=/datalumos/237644/fcr:versions/V1/Kenya/Tusome/endline-evaluation/Codebooks/1._Tusome_Endline_EGRA_Panel_Codebook.xlsx&type=file",
+  "kenya_2019"    = "https://www.datalumos.org/datalumos/project/237644/version/V1/view?path=/datalumos/237644/fcr:versions/V1/Kenya/Tusome/endline-evaluation/Codebooks/2._Tusome_Endline_Student_Level_Codebook.xlsx&type=file",
+  "liberia"       = "https://www.datalumos.org/datalumos/project/237226/version/V1/view?path=/datalumos/237226/fcr:versions/V1/Liberia/EGRA-Plus/Codebooks/2008-2010-Baseline-Midline-Endline-Codebook.csv&type=file",
+  "malawi"        = "https://www.datalumos.org/datalumos/project/237426/version/V1/view?path=/datalumos/237426/fcr:versions/V1/Malawi/Malawi-Teacher-Professional-Development-Support--MTPDS----Intervention-Study/MTPDS/Codebooks/DataProfile_Malawi_MTPDS_Baseline.pdf&type=file",
+  "rwanda_2018_g1"= "https://www.datalumos.org/datalumos/project/237672/version/V1/view?path=/datalumos/237672/fcr:versions/V1/Rwanda/Soma-Umenye--Read-to-Know-/2018-baseline/Codebooks/P1_Students_Codebook.xls&type=file",
+  "rwanda_2018_g2"= "https://www.datalumos.org/datalumos/project/237672/version/V1/view?path=/datalumos/237672/fcr:versions/V1/Rwanda/Soma-Umenye--Read-to-Know-/2018-baseline/Codebooks/P2_Students_Codebook.xls&type=file",
+  "rwanda_2018_g3"= "https://www.datalumos.org/datalumos/project/237672/version/V1/view?path=/datalumos/237672/fcr:versions/V1/Rwanda/Soma-Umenye--Read-to-Know-/2018-baseline/Codebooks/P3_Students_Codebook.xls&type=file",
+  "rwanda_2014"   = "https://www.datalumos.org/datalumos/project/237672/version/V1/view?path=/datalumos/237672/fcr:versions/V1/Rwanda/The-Literacy-Language-and-Learning-Initiative--L3-/Codebooks/DataProfile_Rwanda_L3_Baseline.pdf&type=file",
+  "rwanda_2015"   = "https://www.datalumos.org/datalumos/project/237672/version/V1/view?path=/datalumos/237672/fcr:versions/V1/Rwanda/The-Literacy-Language-and-Learning-Initiative--L3-/Codebooks/DataProfile_Rwanda_L3_Midline-1.pdf&type=file",
+  "rwanda_2016"   = "https://www.datalumos.org/datalumos/project/237672/version/V1/view?path=/datalumos/237672/fcr:versions/V1/Rwanda/The-Literacy-Language-and-Learning-Initiative--L3-/Codebooks/DataProfile_Rwanda_L3_Endline.pdf&type=file"
+)
+
+# ── Read projects sheet ────────────────────────────────────────────────────────
+projects <- read_excel(EXCEL_PATH, sheet = "Project description") |>
+  filter(!is.na(country_iso) & country_iso != "") |>
+  rename(
+    Country      = Country,
+    ISO          = country_iso,
+    Project_Name = `Project Name`,
+    Acronym      = `Project Acronym`,
+    Code         = `Project Code`,
+    Description  = `Project Description`,
+    Sampling     = Sampling,
+    Study_Type   = study_type,
+    Study_Design = study_design,
+    Harmonised_ID = `2026 EGRA Harmonisation`
+  ) |>
+  mutate(
+    Code      = str_pad(as.character(Code), 3, pad = "0"),
+    proj_key  = paste0(ISO, "_", Code),
+    DataLumos = datalumos_urls[proj_key]
+  )
+
+# ── Read study rounds sheet ────────────────────────────────────────────────────
+rounds_raw <- read_excel(EXCEL_PATH, sheet = "Study_rounds")
+
+rounds <- rounds_raw |>
+  filter(!is.na(country_iso) & country_iso != "") |>
+  rename(
+    ISO           = country_iso,
+    Code          = project,
+    Round         = Round,
+    Year          = data_collection_year,
+    Grade_sheet   = grade,
+    Svyset        = svyset,
+    RCT           = svy_rct,
+    DataFile_text = datafile_location,
+    Codebook_text = codebook_location,
+    Source        = source,
+    Comments      = comments
+  ) |>
+  mutate(
+    Code          = str_pad(as.character(Code), 3, pad = "0"),
+    proj_key      = paste0(ISO, "_", Code),
+    Year          = as.character(Year),
+    Round         = as.character(Round),
+    Source        = str_trim(Source),
+    across(c(RCT, Comments), ~ifelse(is.na(.) | . == "", "—", .)),
+    Svyset        = ifelse(is.na(Svyset) | Svyset == "", "— not specified —", Svyset),
+    DataFile_text = str_trim(ifelse(is.na(DataFile_text) | DataFile_text == "", "—", DataFile_text)),
+    Codebook_text = str_trim(ifelse(is.na(Codebook_text) | Codebook_text == "", "—", Codebook_text)),
+    DataFile_url  = datafile_urls[Source],
+    Codebook_url  = codebook_urls[Source],
+    Grades = mapply(format_grades, Grade_sheet, DataFile_text, USE.NAMES = FALSE)
+  )
+
+file_mod     <- file.info(EXCEL_PATH)$mtime
+last_updated <- format(file_mod, "%d %B %Y, %H:%M")
+
+browse_base <- rounds |>
+  select(-ISO) |>
+  left_join(
+    projects |>
+      select(proj_key, Country, ISO, Project_Name, Acronym, Study_Type, Study_Design,
+             Description, Sampling, DataLumos, Harmonised_ID),
+    by = "proj_key"
+  ) |>
+  mutate(
+    Study_Name = if_else(
+      !is.na(Acronym) & Acronym != "",
+      paste0(Project_Name, " (", Acronym, ")"),
+      Project_Name
+    ),
+    Study_Type = ifelse(is.na(Study_Type) | Study_Type == "", "unknown", Study_Type),
+    Study_Type_Label = vapply(Study_Type, study_type_label, character(1)),
+    Year = ifelse(is.na(Year) | Year == "" | Year == "`", "—", Year)
+  )
+
+browse_base <- browse_base |>
+  mutate(
+    base_slug = paste0(Source, "_", Code, "_r", Round),
+    study_slug = ifelse(
+      duplicated(base_slug) | duplicated(base_slug, fromLast = TRUE),
+      paste0(base_slug, "_", ifelse(is.na(ISO) | ISO == "", "XX", ISO)),
+      base_slug
+    )
+  ) |>
+  mutate(Detail_url = paste0("studies/", study_slug, ".html"))
+
+browse_filter <- browse_base |>
+  mutate(
+    Grade = if_else(
+      Grades == "—",
+      list("—"),
+      as.list(str_split(Grades, ",\\s*"))
+    )
+  ) |>
+  unnest_longer(Grade, keep_empty = TRUE) |>
+  mutate(Grade = ifelse(is.na(Grade), "—", as.character(Grade)))
+
+sub_tasks_raw <- read_excel(EXCEL_PATH, sheet = "sub-tasks")
+task_meaning  <- read_excel(EXCEL_PATH, sheet = "task meaning")
+
+browse_sd <- SharedData$new(browse_base, key = ~study_slug, group = "af_studies")
+browse_filter_sd <- SharedData$new(browse_filter, key = ~study_slug, group = "af_studies")
+n_studies <- nrow(browse_base)
+```
+
+```{r helpers}
+# ── Reusable header style: force no-wrap at the colDef level ──────────────────
+# This beats reactable's own inline styles, which CSS alone cannot override.
+HDR_STYLE <- list(
+  whiteSpace = "nowrap",
+  overflow   = "visible"
+)
+
+# ── Badge ──────────────────────────────────────────────────────────────────────
+badge <- function(val, color_map) {
+  if (is.na(val) || val == "" || val == "—")
+    return(span("—", style = "color:#A0AEC0; font-size:11px;"))
+  bg  <- color_map[[val]] %||% "#94A3B8"
+  txt <- switch(val,
+    cross_sectional = "Cross-sectional",
+    school_panel    = "School panel",
+    descriptive     = "Descriptive",
+    pre_post        = "Pre/Post",
+    rct             = "RCT",
+    unknown         = "Unknown",
+    val
+  )
+  span(txt, style = glue(
+    "background:{bg}; color:#fff; font-size:10px; font-weight:600; ",
+    "padding:2px 9px; border-radius:10px; letter-spacing:0.04em; ",
+    "display:inline-block; line-height:1.7; white-space:nowrap;"
+  ))
+}
+
+type_colors   <- list(cross_sectional = AF_NAVY, school_panel = "#7C3AED", unknown = "#94A3B8")
+design_colors <- list(descriptive = "#10B981", pre_post = "#F59E0B", rct = "#EF4444", unknown = "#94A3B8")
+
+# ── Truncated text with Read more toggle ───────────────────────────────────────
+truncate_cell <- function(text, max_chars = 220) {
+  if (is.na(text) || text == "—" || nchar(text) <= max_chars)
+    return(div(text, style = "font-size:12px; line-height:1.6; color:#374151;"))
+  uid <- paste0("tc_", sample(1e7, 1))
+  div(
+    span(str_sub(text, 1, max_chars), style = "font-size:12px; line-height:1.6; color:#374151;"),
+    span("…", id = paste0(uid, "_ell"), style = "color:#94A3B8;"),
+    span(str_sub(text, max_chars + 1),
+         id = paste0(uid, "_rest"),
+         style = "display:none; font-size:12px; line-height:1.6; color:#374151;"),
+    tags$a("Read more", href = "#",
+           onclick = glue(
+             "var r=document.getElementById('{uid}_rest');",
+             "var e=document.getElementById('{uid}_ell');",
+             "var a=this;",
+             "if(r.style.display==='none'){{r.style.display='inline';e.style.display='none';a.textContent='Show less';}}",
+             "else{{r.style.display='none';e.style.display='inline';a.textContent='Read more';}}",
+             "return false;"
+           ),
+           style = paste0("font-size:11px; color:", AF_NAVY, "; margin-left:3px; text-decoration:none; font-weight:700;"))
+  )
+}
+
+# ── Link pill: used for DataLumos, Data File, and Codebook ────────────────────
+link_pill <- function(url, label, color = "#3B82F6", bg = "#EFF6FF", border = "#BFDBFE") {
+  if (is.na(url) || url == "" || url == "—")
+    return(span("—", style = "color:#A0AEC0; font-size:11px;"))
+  tags$a(label, href = url, target = "_blank",
+         style = glue(
+           "font-size:11px; color:{color}; font-weight:600; text-decoration:none; ",
+           "white-space:nowrap; padding:2px 7px; border:1px solid {border}; ",
+           "border-radius:4px; background:{bg}; display:inline-block; line-height:1.6;"
+         ))
+}
+
+# ── File cell: display filename + link pill on separate lines ─────────────────
+file_cell <- function(text, url) {
+  if (is.na(text) || text == "—")
+    return(span("—", style = "color:#A0AEC0; font-size:12px;"))
+  has_url <- !is.na(url) && url != ""
+  div(
+    div(text, style = "font-size:13px; color:#374151; word-break:break-word; margin-bottom:3px;"),
+    if (has_url) link_pill(url, "Open on DataLumos ↗", "#0F1F38", "#F0F4FF", "#C7D7F5")
+  )
+}
+
+country_flag_img <- function(iso) {
+  if (is.na(iso) || iso == "") return(NULL)
+  iso_lower <- tolower(substr(iso, 1, 2))
+  tags$img(
+    src = glue("https://flagcdn.com/w40/{iso_lower}.png"),
+    alt = "",
+    class = "af-country-flag",
+    loading = "lazy"
+  )
+}
+
+country_cell <- function(country, iso) {
+  div(
+    class = "af-country-cell",
+    country_flag_img(iso),
+    span(country)
+  )
+}
+
+filter_accordion <- function(label, filter_id, shared, column) {
+  div(
+    class = "af-filter-panel",
+    tags$button(
+      type = "button",
+      class = "af-filter-toggle",
+      `aria-expanded` = "false",
+      tags$span(class = "af-filter-icon", "+"),
+      tags$span(class = "af-filter-name", label)
+    ),
+    div(
+      class = "af-filter-body af-crosstalk",
+      filter_checkbox(filter_id, NULL, shared, as.formula(paste0("~", column)))
+    )
+  )
+}
+
+row_arrow_icon <- function() {
+  HTML(paste0(
+    '<svg class="af-row-arrow-svg" xmlns="http://www.w3.org/2000/svg" ',
+    'width="22" height="22" viewBox="0 0 24 24" aria-hidden="true">',
+    '<path d="M4 12h13" stroke="#1B6FD8" stroke-width="2.5" stroke-linecap="round"/>',
+    '<path d="M13 7l6 5-6 5" fill="#1B6FD8" stroke="#1B6FD8" ',
+    'stroke-width="1.5" stroke-linejoin="round"/>',
+    '</svg>'
+  ))
+}
+
+search_box <- div(
+  class = "af-search-wrap",
+  tags$input(
+    type = "search",
+    id = "af-study-search",
+    class = "af-search-input",
+    placeholder = "Search",
+    autocomplete = "off"
+  ),
+  tags$span(
+    class = "af-search-icon",
+    `aria-hidden` = "true",
+    HTML(paste0(
+      '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" ',
+      'viewBox="0 0 24 24" fill="none" stroke="currentColor" ',
+      'stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">',
+      '<circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/>',
+      '</svg>'
+    ))
+  )
+)
+```
+
+```{r header}
+aflearn_logo <- knitr::image_uri("AFLEARN logo transparent.png")
+
+div(
+  div(class = "af-logobar",
+    tags$img(src = aflearn_logo, class = "af-logo-aflearn", alt = "AFLearn DataHub")
+  ),
+  div(class = "af-header",
+    div(class = "af-header-inner",
+      div(class = "af-brand",
+        span("Harmonised EGRA/EGMA Dataset", class = "af-page-title"),
+        span("Project & Study Rounds Reference", class = "af-subtitle")
+      ),
+      div(class = "af-header-actions",
+        tags$a(
+          href = HARMONISED_DATA_URL,
+          target = "_blank",
+          class = "af-cta-btn",
+          "Access harmonised dataset"
+        ),
+        div(class = "af-meta",
+          span("Source file last updated", class = "af-meta-label"),
+          span(last_updated, class = "af-meta-value")
+        )
+      )
+    ),
+    p(class = "af-description",
+      "Browse EGRA/EGMA study rounds by country. Click a row for project details, ",
+      tags$code("svyset"), " commands, and DataLumos links."
+    )
+  )
+)
+```
+
+```{r table}
+browse_filters <- div(
+  class = "af-filters",
+  filter_accordion("Country", "filter-country", browse_sd, "Country"),
+  filter_accordion("Year", "filter-year", browse_sd, "Year"),
+  filter_accordion("Grade", "filter-grade", browse_filter_sd, "Grade"),
+  filter_accordion("Study type", "filter-study-type", browse_sd, "Study_Type_Label"),
+  p(class = "af-filter-hint",
+    glue("{n_studies} study rounds · click a row to open its detail page"))
+)
+
+browse_table <- reactable(
+  browse_sd,
+  elementId     = "browse-table",
+  searchable    = FALSE,
+  sortable      = TRUE,
+  resizable     = FALSE,
+  pagination    = FALSE,
+  highlight     = TRUE,
+  compact       = FALSE,
+  defaultColDef = colDef(vAlign = "top", headerVAlign = "center",
+                         headerStyle = HDR_STYLE, show = FALSE),
+
+  theme = reactableTheme(
+    backgroundColor  = "#FFFFFF",
+    borderColor      = "#E5E7EB",
+    highlightColor   = "#F3F4F6",
+    cellPadding      = "10px 12px",
+    style = list(fontFamily = "'Nunito', sans-serif", fontSize = "15px")
+  ),
+
+  columns = list(
+    Country = colDef(
+      name = "Country", minWidth = 200, show = TRUE,
+      headerStyle = HDR_STYLE,
+      cell = function(value, index) {
+        iso <- browse_base[index, "ISO", drop = TRUE]
+        country_cell(value, iso)
+      }
+    ),
+    Year = colDef(
+      name = "Year", width = 100, minWidth = 100, align = "center", show = TRUE,
+      headerStyle = c(HDR_STYLE, list(minWidth = "100px", width = "100px")),
+      style = list(
+        color = AF_NAVY, fontWeight = "700",
+        whiteSpace = "nowrap", fontVariantNumeric = "tabular-nums"
+      )
+    ),
+    Study_Name = colDef(
+      name = "Study name", minWidth = 280, show = TRUE,
+      html = TRUE,
+      headerStyle = HDR_STYLE,
+      cell = function(value, index) {
+        href <- browse_base$Detail_url[[index]]
+        paste0(
+          '<a href="', htmltools::htmlEscape(href), '" class="af-study-link" ',
+          'style="color:#374151;text-decoration:none;">',
+          htmltools::htmlEscape(value), "</a>"
+        )
+      }
+    ),
+    Grades = colDef(
+      name = "Grade(s)", width = 130, minWidth = 130, align = "center", show = TRUE,
+      headerStyle = c(HDR_STYLE, list(minWidth = "130px", width = "130px")),
+      style = list(whiteSpace = "nowrap"),
+      cell = function(v) {
+        if (is.na(v) || v == "—")
+          return(span("—", style = "color:#CBD5E0; font-size:11px;"))
+        span(v, style = paste0("font-size:14px; color:", AF_NAVY, "; font-weight:700; white-space:nowrap;"))
+      }
+    ),
+    Grade = colDef(show = FALSE),
+    Study_Type_Label = colDef(show = FALSE),
+    Study_Type = colDef(show = FALSE),
+    Study_Design = colDef(show = FALSE),
+    Project_Name = colDef(show = FALSE),
+    Acronym = colDef(show = FALSE),
+    Description = colDef(show = FALSE),
+    Sampling = colDef(show = FALSE),
+    DataLumos = colDef(show = FALSE),
+    DataFile_text = colDef(show = FALSE),
+    DataFile_url = colDef(show = FALSE),
+    Codebook_text = colDef(show = FALSE),
+    Codebook_url = colDef(show = FALSE),
+    Svyset = colDef(show = FALSE),
+    Source = colDef(show = FALSE),
+    Round = colDef(show = FALSE),
+    proj_key = colDef(show = FALSE),
+    ISO = colDef(show = FALSE),
+    Harmonised_ID = colDef(show = FALSE),
+    RCT = colDef(show = FALSE),
+    Comments = colDef(show = FALSE),
+    study_slug = colDef(show = FALSE),
+    Detail_url = colDef(show = FALSE),
+    Row_arrow = colDef(
+      name = "", width = 48, minWidth = 48, align = "center", show = TRUE,
+      sortable = FALSE, searchable = FALSE, html = TRUE,
+      headerStyle = HDR_STYLE,
+      cell = function(v, index) {
+        href <- browse_base$Detail_url[[index]]
+        tags$a(href = href, style = "text-decoration:none;", row_arrow_icon())
+      }
+    )
+  )
+)
+
+browse_table <- htmlwidgets::onRender(
+  browse_table,
+  "
+  function(el, x) {
+    var allUrls = (x.tag && x.tag.attribs && x.tag.attribs.data && x.tag.attribs.data.Detail_url) || [];
+    function rowUrls() {
+      if (typeof Reactable === 'undefined') return allUrls;
+      var state = Reactable.getState('browse-table');
+      if (state && state.data && state.data.length) {
+        var fromState = state.data.map(function(r) { return r.Detail_url; });
+        if (fromState[0]) return fromState;
+      }
+      return allUrls;
+    }
+    function rowUrl(row) {
+      var u = row.getAttribute('data-detail-url');
+      if (u) return u;
+      var a = row.querySelector('a.af-study-link, a[href*=\"studies/\"]');
+      return a ? a.getAttribute('href') : '';
+    }
+    function syncRowUrls() {
+      var urls = rowUrls();
+      var groups = el.querySelectorAll('.rt-tbody .rt-tr-group');
+      groups.forEach(function(g, i) {
+        var url = urls[i] || '';
+        if (url) {
+          g.style.cursor = 'pointer';
+          g.setAttribute('data-detail-url', url);
+        }
+      });
+      return groups.length > 0;
+    }
+    if (el.dataset.afStudyNav !== '1') {
+      el.dataset.afStudyNav = '1';
+      el.addEventListener('click', function(e) {
+        var row = e.target.closest('.rt-tbody .rt-tr-group');
+        if (!row) return;
+        var url = rowUrl(row);
+        if (!url) return;
+        e.preventDefault();
+        window.location.assign(url);
+      });
+    }
+    var tries = 0;
+    var timer = setInterval(function() {
+      syncRowUrls();
+      if (el.querySelectorAll('.rt-tbody .rt-tr-group').length > 0 || ++tries > 50) clearInterval(timer);
+    }, 100);
+    if (typeof Reactable !== 'undefined' && Reactable.onStateChange) {
+      Reactable.onStateChange('browse-table', syncRowUrls);
+    }
+  }
+  "
+)
+
+div(
+  class = "af-layout",
+  div(
+    class = "af-sidebar",
+    search_box,
+    div(
+      class = "af-sidebar-title",
+      "Filter Results ",
+      span(class = "af-sidebar-count", glue("({n_studies})"))
+    ),
+    browse_filters
+  ),
+  div(
+    class = "af-main",
+    div(class = "af-main-title", "Study Rounds"),
+    browse_table
+  )
+)
+```
+
+```{r generate-study-pages}
+source("aflearn_study_pages.R")
+study_logo <- knitr::image_uri("AFLEARN logo transparent.png")
+write_study_detail_pages(
+  browse_base, sub_tasks_raw, task_meaning,
+  studies_dir = STUDIES_DIR,
+  index_url = "../index.html",
+  logo_uri = study_logo,
+  file_cell = file_cell,
+  link_pill = link_pill,
+  study_type_label = study_type_label
+)
+```
+
+```{=html}
+<style>
+*, *::before, *::after { box-sizing: border-box; }
+
+body {
+  font-family: 'Nunito', sans-serif;
+  font-size: 16px;
+  background: #FFFFFF;
+  color: #1F2937;
+  margin: 0; padding: 0;
+}
+
+#title-block-header { display: none !important; }
+
+.quarto-container, .container-fluid, #quarto-content, main {
+  max-width: 100% !important;
+  padding: 0 !important;
+  margin: 0 !important;
+}
+
+/* ── Logo bar (layer 1 — darkest navy) ───────────────────────────────────── */
+.af-logobar {
+  display: flex;
+  align-items: center;
+  padding: 0.85rem 2rem;
+  background: #080056;
+}
+.af-logo-aflearn {
+  height: 96px;
+  width: auto;
+  max-width: 320px;
+  object-fit: contain;
+  display: block;
+}
+
+/* ── Header (layer 2 — lighter navy) ───────────────────────────────────────── */
+.af-header {
+  background: #100A78;
+  padding: 1.5rem 2rem 1.25rem;
+  border-bottom: 3px solid #080056;
+}
+.af-header-inner {
+  display: flex; align-items: flex-start;
+  justify-content: space-between; flex-wrap: wrap;
+  gap: 1rem; margin-bottom: 0.75rem;
+}
+.af-brand    { display: flex; flex-direction: column; gap: 0.25rem; }
+.af-page-title { font-size: 1.35rem; font-weight: 700; color: #FFFFFF; letter-spacing: 0.02em; }
+.af-subtitle { font-size: 1.05rem; font-weight: 400; color: #94A3B8; }
+.af-header-actions {
+  display: flex; flex-direction: column; align-items: flex-end; gap: 0.65rem;
+}
+.af-cta-btn {
+  font-family: 'Nunito', sans-serif;
+  font-size: 0.95rem; font-weight: 800;
+  color: #06003E; background: #FFFFFF;
+  padding: 0.6rem 1.15rem; border-radius: 6px;
+  text-decoration: none; white-space: nowrap;
+  transition: background 0.15s;
+}
+.af-cta-btn:hover { background: #EFF6FF; color: #0A0058; }
+.af-meta     { display: flex; flex-direction: column; align-items: flex-end; gap: 0.15rem; }
+.af-meta-label { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.09em; color: #64748B; }
+.af-meta-value { font-size: 0.9rem; font-weight: 500; color: #94A3B8; }
+.af-description { font-size: 1rem; color: #94A3B8; line-height: 1.65; margin: 0; max-width: 85ch; }
+.af-description code {
+  font-family: ui-monospace, monospace;
+  background: rgba(255,255,255,0.15); color: #FFFFFF;
+  padding: 0.1em 0.35em; border-radius: 3px; font-size: 0.9em;
+}
+
+/* ── Sidebar + main layout ────────────────────────────────────────────────── */
+.af-layout {
+  display: flex;
+  align-items: stretch;
+  min-height: 60vh;
+  background: #FFFFFF;
+}
+.af-sidebar {
+  width: 270px;
+  flex-shrink: 0;
+  padding: 1.25rem 1.1rem 1.5rem;
+  border-right: 1px solid #E5E7EB;
+  background: #FFFFFF;
+}
+.af-sidebar-title {
+  font-size: 1.05rem;
+  font-weight: 800;
+  color: #0F1F38;
+  margin-bottom: 0.75rem;
+  padding-bottom: 0.65rem;
+  border-bottom: 1px solid #E5E7EB;
+}
+.af-sidebar-count {
+  font-weight: 400;
+  color: #6B7280;
+}
+.af-search-wrap {
+  position: relative;
+  margin-bottom: 1rem;
+}
+.af-search-input {
+  width: 100%;
+  font-family: 'Nunito', sans-serif;
+  font-size: 15px;
+  color: #1F2937;
+  padding: 10px 42px 10px 12px;
+  border: 1px solid #D1D5DB;
+  border-radius: 0;
+  background: #FFFFFF;
+  outline: none;
+}
+.af-search-input::placeholder { color: #9CA3AF; }
+.af-search-input:focus { border-color: #06003E; }
+.af-search-icon {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: #06003E;
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  line-height: 0;
+}
+.af-main-title {
+  background: #100A78;
+  color: #FFFFFF;
+  font-size: 1.5rem;
+  font-weight: 800;
+  padding: 0.95rem 1.5rem;
+  letter-spacing: 0.02em;
+}
+.af-main {
+  flex: 1;
+  min-width: 0;
+  background: #FFFFFF;
+  display: flex;
+  flex-direction: column;
+}
+.af-main #browse-table {
+  flex: 1 1 auto;
+  min-height: 50vh;
+}
+
+/* ── Accordion filters (left sidebar) ─────────────────────────────────────── */
+.af-filters {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 0;
+  background: transparent;
+  border: none;
+}
+.af-filter-panel {
+  border-bottom: 1px solid #E5E7EB;
+}
+.af-filter-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 0.85rem 0.25rem;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-family: 'Nunito', sans-serif;
+  font-size: 0.82rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #0F1F38;
+}
+.af-filter-toggle:hover .af-filter-icon { color: #C8892A !important; }
+.af-filter-icon {
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: #06003E;
+  line-height: 1;
+  min-width: 1.25rem;
+  text-align: center;
+  transition: color 0.15s;
+}
+.af-filter-body {
+  display: none;
+  padding: 0 0.25rem 0.85rem;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.af-filter-panel.open .af-filter-body { display: block; }
+.af-filter-hint {
+  font-size: 0.88rem; color: #94A3B8;
+  line-height: 1.5; margin: 1rem 0 0;
+}
+.af-crosstalk .crosstalk-input-checkboxgroup {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.af-crosstalk .crosstalk-input-checkboxgroup label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-family: 'Nunito', sans-serif !important;
+  font-size: 0.95rem !important;
+  font-weight: 600;
+  color: #374151;
+  cursor: pointer;
+  margin: 0;
+}
+.af-crosstalk .crosstalk-input-checkboxgroup input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  accent-color: #06003E;
+  cursor: pointer;
+}
+
+/* ── Country flags ────────────────────────────────────────────────────────── */
+.af-country-cell {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-weight: 500;
+  color: #1F2937;
+  font-size: 15px;
+}
+.af-country-flag {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 1px solid #E5E7EB;
+  flex-shrink: 0;
+}
+
+/* ── Table headers (transparent bar + divider line) ─────────────────────── */
+.rt-thead {
+  border-bottom: 1px solid #D1D5DB !important;
+}
+.rt-th {
+  background: transparent !important;
+  color: #06003E !important;
+  font-size: 0.78rem !important;
+  font-weight: 800 !important;
+  font-family: 'Nunito', sans-serif !important;
+  text-transform: uppercase !important;
+  letter-spacing: 0.07em !important;
+  padding: 12px 12px 10px !important;
+  border-right: none !important;
+  border-bottom: none !important;
+  white-space: nowrap !important;
+  overflow: visible !important;
+}
+
+/* Force every header's inner content div to not wrap */
+.rt-th > div,
+.rt-th > div > div {
+  white-space: nowrap !important;
+  overflow: visible !important;
+}
+
+/* Resize handle styling */
+.rt-th-resize-handle {
+  border-right: 2px solid #D1D5DB !important;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.rt-th:hover .rt-th-resize-handle { opacity: 1; }
+
+/* Force the reactable table itself not to compress columns below their set width */
+.rt-table {
+  min-width: 100%;
+  table-layout: auto !important;
+}
+
+/* Any header whose inline width style is set must be respected */
+.rt-th[style*="width"] {
+  flex-shrink: 0 !important;
+  min-width: 0 !important;
+}
+.rt-th:last-child  { border-right: none !important; }
+.rt-th:hover       { background: transparent !important; color: #06003E !important; }
+.rt-th-sort-icon   { color: #06003E !important; opacity: 0.85; }
+.rt-th[aria-sort="ascending"],
+.rt-th[aria-sort="descending"] {
+  color: #C8892A !important;
+}
+.rt-th[aria-sort="ascending"] .rt-th-sort-icon,
+.rt-th[aria-sort="descending"] .rt-th-sort-icon {
+  color: #C8892A !important;
+  opacity: 1;
+}
+.rt-th[aria-sort="ascending"]:hover,
+.rt-th[aria-sort="descending"]:hover {
+  color: #C8892A !important;
+}
+
+/* ── Body rows ────────────────────────────────────────────────────────────── */
+.rt-tr-group       { cursor: pointer; }
+.rt-tr         { border-bottom: 1px solid #F0F0F0 !important; transition: background 0.1s; }
+.rt-tr:hover   { background: #F9FAFB !important; }
+.rt-tr-striped { background: #FAFAFA !important; }
+.rt-td {
+  padding: 11px 12px !important;
+  border-right: 1px solid #F3F4F6 !important;
+  vertical-align: middle !important;
+  font-family: 'Nunito', sans-serif !important;
+  font-size: 15px !important;
+}
+.rt-td:last-child { border-right: none !important; }
+
+.af-row-arrow-svg {
+  display: inline-block;
+  vertical-align: middle;
+}
+.af-study-link:hover { color: #1B6FD8 !important; text-decoration: underline !important; }
+
+/* Keep Year / Grade(s) on one line */
+.rt-th[style*="width: 100px"],
+.rt-td[style*="width: 100px"],
+.rt-th[style*="width: 110px"],
+.rt-td[style*="width: 110px"],
+.rt-th[style*="width: 130px"],
+.rt-td[style*="width: 130px"] {
+  white-space: nowrap !important;
+  flex-shrink: 0 !important;
+}
+
+/* ── Legend ───────────────────────────────────────────────────────────────── */
+.af-legend {
+  display: flex; gap: 1.25rem; flex-wrap: wrap; align-items: center;
+  padding: 0.85rem 2rem;
+  background: #FFFFFF;
+  border-bottom: 1px solid #E5E7EB;
+  font-size: 13px; color: #6B7280;
+}
+.af-legend-label { font-weight: 700; color: #374151; }
+
+/* ── Footer ───────────────────────────────────────────────────────────────── */
+.af-footer {
+  padding: 0.9rem 2rem 1.5rem;
+  font-size: 0.82rem; color: #9CA3AF;
+  border-top: 1px solid #E5E7EB;
+  background: #FFFFFF;
+}
+.af-footer code {
+  font-family: ui-monospace, monospace;
+  background: #E5E7EB; padding: 1px 4px; border-radius: 3px;
+}
+
+@media (max-width: 900px) {
+  .af-layout { flex-direction: column; }
+  .af-sidebar {
+    width: 100%;
+    border-right: none;
+    border-bottom: 1px solid #E5E7EB;
+  }
+  .af-logo-aflearn { height: 72px; max-width: 260px; }
+}
+</style>
+
+<script>
+function wireStudySearch() {
+  var input = document.getElementById("af-study-search");
+  if (!input || input.dataset.wired === "true") return false;
+  if (typeof Reactable === "undefined") return false;
+  input.dataset.wired = "true";
+  input.addEventListener("input", function () {
+    Reactable.setSearch("browse-table", input.value);
+  });
+  return true;
+}
+
+document.addEventListener("DOMContentLoaded", function () {
+  document.querySelectorAll(".af-filter-toggle").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var panel = btn.closest(".af-filter-panel");
+      var open = panel.classList.toggle("open");
+      btn.querySelector(".af-filter-icon").textContent = open ? "\u00d7" : "+";
+      btn.setAttribute("aria-expanded", open ? "true" : "false");
+    });
+  });
+
+  if (!wireStudySearch()) {
+    var tries = 0;
+    var timer = setInterval(function () {
+      if (wireStudySearch() || ++tries > 50) clearInterval(timer);
+    }, 100);
+  }
+});
+
+if (window.HTMLWidgets) {
+  HTMLWidgets.addPostRenderHandler(function (el) {
+    if (el && el.id === "browse-table") wireStudySearch();
+  });
+}
+</script>
+
+<div class="af-legend">
+  <span class="af-legend-label">Study type:</span>
+  <span style="background:#06003E;color:#fff;font-size:11px;padding:2px 8px;border-radius:9px;">Cross-sectional</span>
+  <span style="background:#7C3AED;color:#fff;font-size:10px;padding:2px 8px;border-radius:9px;">School panel</span>
+  <span class="af-legend-label" style="margin-left:0.75rem;">Study design:</span>
+  <span style="background:#10B981;color:#fff;font-size:10px;padding:2px 8px;border-radius:9px;">Descriptive</span>
+  <span style="background:#F59E0B;color:#fff;font-size:10px;padding:2px 8px;border-radius:9px;">Pre/Post</span>
+  <span style="background:#EF4444;color:#fff;font-size:10px;padding:2px 8px;border-radius:9px;">RCT</span>
+  <span style="margin-left:auto; color:#94A3B8;">▶ Click a row to open the study detail page</span>
+</div>
+
+<div class="af-footer">
+  <strong>AFLearn Harmonised EGRA/EGMA Dataset</strong> ·
+  DataFirst, University of Cape Town ·
+  Access the harmonised dataset via the
+  <a href="https://www.datafirst.uct.ac.za/dataportal/index.php" target="_blank" style="color:#06003E; text-decoration:none;">DataFirst Data Portal</a> ·
+  Source files via <a href="https://www.datalumos.org" target="_blank" style="color:#06003E; text-decoration:none;">DataLumos</a> ·
+  For queries contact <a href="mailto:datafirst@uct.ac.za" style="color:#06003E; text-decoration:none;">datafirst@uct.ac.za</a>
+</div>
+```

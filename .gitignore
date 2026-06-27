@@ -1,0 +1,22 @@
+# Quarto intermediates
+.quarto/
+*_files/
+*.knit.md
+
+# R / RStudio
+.Rproj.user
+.Rhistory
+.RData
+*.Rproj.user
+
+# Root-level HTML copies (published site lives in docs/)
+aflearn_dataset_reference*.html
+aflearn_variable_availability.html
+/studies/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+/.quarto/
