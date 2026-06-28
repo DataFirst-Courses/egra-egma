@@ -10,7 +10,7 @@ format:
       text: |
         <link rel="preconnect" href="https://fonts.googleapis.com">
         <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-        <link href="https://fonts.googleapis.com/css2?family=Nunito:ital,wght@0,400;0,600;0,700;0,800;1,400&display=swap" rel="stylesheet">
+        <link href="https://fonts.googleapis.com/css2?family=Source+Sans+3:ital,wght@0,400;0,500;0,600;0,700;0,800;1,400&display=swap" rel="stylesheet">
 execute:
   echo: false
   warning: false
@@ -28,6 +28,8 @@ library(crosstalk)
 library(tidyr)
 library(htmlwidgets)
 library(jsonlite)
+
+source("aflearn_study_pages.R")
 
 `%||%` <- function(x, y) if (is.null(x) || length(x) == 0 || (length(x) == 1 && is.na(x))) y else x
 
@@ -173,6 +175,7 @@ rounds <- rounds_raw |>
     DataFile_text = datafile_location,
     Codebook_text = codebook_location,
     Source        = source,
+    Language_raw  = Language,
     Comments      = comments
   ) |>
   mutate(
@@ -187,13 +190,15 @@ rounds <- rounds_raw |>
     Codebook_text = str_trim(ifelse(is.na(Codebook_text) | Codebook_text == "", "—", Codebook_text)),
     DataFile_url  = datafile_urls[Source],
     Codebook_url  = codebook_urls[Source],
-    Grades = mapply(format_grades, Grade_sheet, DataFile_text, USE.NAMES = FALSE)
+    Grades = mapply(format_grades, Grade_sheet, DataFile_text, USE.NAMES = FALSE),
+    Languages = format_languages(Language_raw)
   )
 
 file_mod     <- file.info(EXCEL_PATH)$mtime
 last_updated <- format(file_mod, "%d %B %Y, %H:%M")
 
 browse_base <- rounds |>
+  mutate(round_ISO = ISO) |>
   select(-ISO) |>
   left_join(
     projects |>
@@ -202,6 +207,12 @@ browse_base <- rounds |>
     by = "proj_key"
   ) |>
   mutate(
+    ISO = if_else(is.na(ISO) | ISO == "", round_ISO, ISO),
+    Country = if_else(
+      is.na(Country) | Country == "",
+      dplyr::recode(round_ISO, !!!as.list(AF_ISO_COUNTRY)),
+      Country
+    ),
     Study_Name = if_else(
       !is.na(Acronym) & Acronym != "",
       paste0(Project_Name, " (", Acronym, ")"),
@@ -210,20 +221,25 @@ browse_base <- rounds |>
     Study_Type = ifelse(is.na(Study_Type) | Study_Type == "", "unknown", Study_Type),
     Study_Type_Label = vapply(Study_Type, study_type_label, character(1)),
     Year = ifelse(is.na(Year) | Year == "" | Year == "`", "—", Year)
-  )
+  ) |>
+  select(-round_ISO)
 
 browse_base <- browse_base |>
   mutate(
-    base_slug = paste0(Source, "_", Code, "_r", Round),
-    study_slug = ifelse(
-      duplicated(base_slug) | duplicated(base_slug, fromLast = TRUE),
-      paste0(base_slug, "_", ifelse(is.na(ISO) | ISO == "", "XX", ISO)),
-      base_slug
-    )
-  ) |>
-  mutate(Detail_url = paste0("studies/", study_slug, ".html"))
+    base_slug = paste0(Source, "_", Code, "_r", Round)
+  )
 
-browse_filter <- browse_base |>
+sub_tasks_raw <- read_excel(EXCEL_PATH, sheet = "sub-tasks")
+task_meaning  <- read_excel(EXCEL_PATH, sheet = "task meaning")
+
+browse_base <- assign_study_url_slugs(browse_base)
+
+# study_slug / Detail_url / country_slug contain "/" (URL paths); must not enter
+# crosstalk data or reactable builds a broken crosstalkKey dict.
+browse_sd_data <- browse_base |>
+  dplyr::select(-dplyr::any_of(c("study_slug", "Detail_url", "country_slug")))
+
+browse_filter <- browse_sd_data |>
   mutate(
     Grade = if_else(
       Grades == "—",
@@ -234,11 +250,20 @@ browse_filter <- browse_base |>
   unnest_longer(Grade, keep_empty = TRUE) |>
   mutate(Grade = ifelse(is.na(Grade), "—", as.character(Grade)))
 
-sub_tasks_raw <- read_excel(EXCEL_PATH, sheet = "sub-tasks")
-task_meaning  <- read_excel(EXCEL_PATH, sheet = "task meaning")
+browse_language_filter <- browse_sd_data |>
+  mutate(
+    Language = if_else(
+      is.na(Language_raw) | Language_raw == "" | Languages == "—",
+      list("—"),
+      as.list(lapply(str_split(Languages, ",\\s*"), function(v) v[nzchar(v)]))
+    )
+  ) |>
+  unnest_longer(Language, keep_empty = TRUE) |>
+  mutate(Language = ifelse(is.na(Language) | Language == "", "—", as.character(Language)))
 
-browse_sd <- SharedData$new(browse_base, key = ~study_slug, group = "af_studies")
-browse_filter_sd <- SharedData$new(browse_filter, key = ~study_slug, group = "af_studies")
+browse_sd <- SharedData$new(browse_sd_data, key = ~study_key, group = "af_studies")
+browse_filter_sd <- SharedData$new(browse_filter, key = ~study_key, group = "af_studies")
+browse_language_filter_sd <- SharedData$new(browse_language_filter, key = ~study_key, group = "af_studies")
 n_studies <- nrow(browse_base)
 ```
 
@@ -431,6 +456,7 @@ browse_filters <- div(
   filter_accordion("Country", "filter-country", browse_sd, "Country"),
   filter_accordion("Year", "filter-year", browse_sd, "Year"),
   filter_accordion("Grade", "filter-grade", browse_filter_sd, "Grade"),
+  filter_accordion("Language", "filter-language", browse_language_filter_sd, "Language"),
   filter_accordion("Study type", "filter-study-type", browse_sd, "Study_Type_Label"),
   p(class = "af-filter-hint",
     glue("{n_studies} study rounds · click a row to open its detail page"))
@@ -453,7 +479,7 @@ browse_table <- reactable(
     borderColor      = "#E5E7EB",
     highlightColor   = "#F3F4F6",
     cellPadding      = "10px 12px",
-    style = list(fontFamily = "'Nunito', sans-serif", fontSize = "15px")
+    style = list(fontFamily = "var(--af-font)", fontSize = "15px")
   ),
 
   columns = list(
@@ -497,6 +523,9 @@ browse_table <- reactable(
       }
     ),
     Grade = colDef(show = FALSE),
+    Language = colDef(show = FALSE),
+    Languages = colDef(show = FALSE),
+    Language_raw = colDef(show = FALSE),
     Study_Type_Label = colDef(show = FALSE),
     Study_Type = colDef(show = FALSE),
     Study_Design = colDef(show = FALSE),
@@ -517,8 +546,7 @@ browse_table <- reactable(
     Harmonised_ID = colDef(show = FALSE),
     RCT = colDef(show = FALSE),
     Comments = colDef(show = FALSE),
-    study_slug = colDef(show = FALSE),
-    Detail_url = colDef(show = FALSE),
+    study_key = colDef(show = FALSE),
     Row_arrow = colDef(
       name = "", width = 48, minWidth = 48, align = "center", show = TRUE,
       sortable = FALSE, searchable = FALSE, html = TRUE,
@@ -531,11 +559,16 @@ browse_table <- reactable(
   )
 )
 
+# reactable serializes slash-based row labels into crosstalkKey as a named dict;
+# filters expect a plain vector keyed by study_key or the table will not render.
+browse_table$x$tag$attribs$crosstalkKey <- as.list(as.character(browse_base$study_key))
+browse_table$x$tag$attribs$detailUrls <- as.character(browse_base$Detail_url)
+
 browse_table <- htmlwidgets::onRender(
   browse_table,
   "
   function(el, x) {
-    var allUrls = (x.tag && x.tag.attribs && x.tag.attribs.data && x.tag.attribs.data.Detail_url) || [];
+    var allUrls = (x.tag && x.tag.attribs && x.tag.attribs.detailUrls) || [];
     function rowUrls() {
       if (typeof Reactable === 'undefined') return allUrls;
       var state = Reactable.getState('browse-table');
@@ -607,12 +640,10 @@ div(
 ```
 
 ```{r generate-study-pages}
-source("aflearn_study_pages.R")
 study_logo <- knitr::image_uri("AFLEARN logo transparent.png")
 write_study_detail_pages(
   browse_base, sub_tasks_raw, task_meaning,
   studies_dir = STUDIES_DIR,
-  index_url = "../index.html",
   logo_uri = study_logo,
   file_cell = file_cell,
   link_pill = link_pill,
@@ -622,10 +653,16 @@ write_study_detail_pages(
 
 ```{=html}
 <style>
+:root { --af-font: 'Source Sans 3', sans-serif; }
 *, *::before, *::after { box-sizing: border-box; }
 
+html, body,
+input, button, select, textarea,
+.rt-table, .rt-th, .rt-td, .rt-resizer, .reactable {
+  font-family: var(--af-font);
+}
+
 body {
-  font-family: 'Nunito', sans-serif;
   font-size: 16px;
   background: #FFFFFF;
   color: #1F2937;
@@ -673,7 +710,7 @@ body {
   display: flex; flex-direction: column; align-items: flex-end; gap: 0.65rem;
 }
 .af-cta-btn {
-  font-family: 'Nunito', sans-serif;
+  font-family: var(--af-font);
   font-size: 0.95rem; font-weight: 800;
   color: #06003E; background: #FFFFFF;
   padding: 0.6rem 1.15rem; border-radius: 6px;
@@ -723,7 +760,7 @@ body {
 }
 .af-search-input {
   width: 100%;
-  font-family: 'Nunito', sans-serif;
+  font-family: var(--af-font);
   font-size: 15px;
   color: #1F2937;
   padding: 10px 42px 10px 12px;
@@ -786,7 +823,7 @@ body {
   border: none;
   background: transparent;
   cursor: pointer;
-  font-family: 'Nunito', sans-serif;
+  font-family: var(--af-font);
   font-size: 0.82rem;
   font-weight: 800;
   letter-spacing: 0.06em;
@@ -823,7 +860,7 @@ body {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  font-family: 'Nunito', sans-serif !important;
+  font-family: var(--af-font) !important;
   font-size: 0.95rem !important;
   font-weight: 600;
   color: #374151;
@@ -864,7 +901,7 @@ body {
   color: #06003E !important;
   font-size: 0.78rem !important;
   font-weight: 800 !important;
-  font-family: 'Nunito', sans-serif !important;
+  font-family: var(--af-font) !important;
   text-transform: uppercase !important;
   letter-spacing: 0.07em !important;
   padding: 12px 12px 10px !important;
@@ -926,7 +963,7 @@ body {
   padding: 11px 12px !important;
   border-right: 1px solid #F3F4F6 !important;
   vertical-align: middle !important;
-  font-family: 'Nunito', sans-serif !important;
+  font-family: var(--af-font) !important;
   font-size: 15px !important;
 }
 .rt-td:last-child { border-right: none !important; }

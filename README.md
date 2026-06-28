@@ -39,17 +39,17 @@ servr::httd(dir = "docs", port = 4321)
 
 ## GitHub Pages setup (one-time)
 
-Repository: **[github.com/DataFirst-AFLEARN/egra-egma](https://github.com/DataFirst-AFLEARN/egra-egma)**
+Repository: **[github.com/DataFirst-Courses/egra-egma](https://github.com/DataFirst-Courses/egra-egma)**
 
 Live site URL (after Pages is enabled):  
-**https://datafirst-aflearn.github.io/egra-egma/**
+**https://datafirst-courses.github.io/egra-egma/**
 
 ### 1. Link this R project to GitHub (RStudio)
 
 Open **`aflearn-site.Rproj`**, then in the **Terminal** pane:
 
 ```bash
-git remote add origin https://github.com/DataFirst-AFLEARN/egra-egma.git
+git remote add origin https://github.com/DataFirst-Courses/egra-egma.git
 git branch -M main
 git add .
 git commit -m "Initial AFLearn EGRA/EGMA study rounds site"
@@ -59,7 +59,7 @@ git push -u origin main
 If `git remote add` says the remote already exists:
 
 ```bash
-git remote set-url origin https://github.com/DataFirst-AFLEARN/egra-egma.git
+git remote set-url origin https://github.com/DataFirst-Courses/egra-egma.git
 ```
 
 **RStudio Git pane (alternative):** after the first `git commit`, use *Tools → Version Control → Project Options → Git/SVN* and set the remote URL to the repo above, then **Push** in the Git tab.
@@ -82,7 +82,7 @@ If you do not see **/docs** in the folder dropdown, push your code first (step 1
 
 ### 3. Organisation repos
 
-If Pages settings are missing or greyed out, a **DataFirst-AFLEARN org admin** may need to enable Pages under **Organisation Settings → Pages**.
+If Pages settings are missing or greyed out, a **DataFirst-Courses org admin** may need to enable Pages under **Organisation Settings → Pages**.
 
 ### Update workflow (after Excel or content changes)
 

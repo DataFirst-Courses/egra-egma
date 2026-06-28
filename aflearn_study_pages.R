@@ -1,5 +1,115 @@
 # Generates self-contained study detail HTML pages (sourced from aflearn_dataset_reference_5.qmd)
 
+AF_COUNTRY_SLUG <- c(
+  CD = "drc",
+  DJ = "djibouti",
+  EG = "egypt",
+  ET = "ethiopia",
+  GH = "ghana",
+  KE = "kenya",
+  LR = "liberia",
+  MW = "malawi",
+  MA = "morocco",
+  RW = "rwanda",
+  TZ = "tanzania",
+  ZM = "zambia"
+)
+
+slugify_text <- function(x) {
+  x <- tolower(trimws(as.character(x)))
+  x <- gsub("[^a-z0-9]+", "-", x)
+  gsub("(^-|-$)", "", x)
+}
+
+format_languages <- function(x) {
+  vapply(x, function(s) {
+    if (is.na(s) || s == "") return("\u2014")
+    langs <- trimws(unlist(strsplit(as.character(s), ",", fixed = TRUE)))
+    langs <- langs[nzchar(langs)]
+    if (!length(langs)) return("\u2014")
+    paste(langs, collapse = ", ")
+  }, character(1), USE.NAMES = FALSE)
+}
+
+AF_ISO_COUNTRY <- c(
+  CD = "Democratic Republic of the Congo",
+  DJ = "Djibouti",
+  EG = "Egypt",
+  ET = "Ethiopia",
+  GH = "Ghana",
+  KE = "Kenya",
+  LR = "Liberia",
+  MW = "Malawi",
+  MA = "Morocco",
+  RW = "Rwanda",
+  TZ = "Tanzania",
+  ZM = "Zambia"
+)
+
+country_url_slug <- function(country, iso, source = NA_character_) {
+  iso <- ifelse(is.na(iso) | iso == "" | iso == "XX", NA_character_, iso)
+  if (!is.na(iso) && iso %in% names(AF_COUNTRY_SLUG)) {
+    return(unname(AF_COUNTRY_SLUG[[iso]]))
+  }
+  if (!is.na(country) && country != "" && !tolower(country) %in% c("na", "—")) {
+    return(slugify_text(country))
+  }
+  src <- tolower(as.character(source))
+  if (grepl("zambia", src, fixed = TRUE)) return("zambia")
+  if (grepl("djibouti|usaid_001", src, fixed = FALSE)) return("djibouti")
+  "unknown"
+}
+
+grade_url_suffix <- function(grades) {
+  if (is.na(grades) || grades == "—") return("")
+  nums <- unlist(regmatches(grades, gregexpr("[0-9]+", grades)))
+  if (length(nums) == 0) return("")
+  if (length(nums) == 1) return(paste0("-g", nums[1]))
+  paste0("-g", paste(nums, collapse = "-"))
+}
+
+study_index_url <- function(study_slug) {
+  n_up <- length(strsplit(study_slug, "/", fixed = TRUE)[[1]])
+  paste0(paste(rep("..", n_up), collapse = "/"), "/index.html")
+}
+
+assign_study_url_slugs <- function(df) {
+  country_slug <- mapply(
+    country_url_slug, df$Country, df$ISO, df$Source,
+    USE.NAMES = FALSE
+  )
+  url_base <- paste0(country_slug, "/", df$Year)
+  grade_tag <- vapply(df$Grades, grade_url_suffix, character(1))
+  n_per_base <- vapply(url_base, function(b) sum(url_base == b), integer(1))
+
+  study_slug <- ifelse(n_per_base > 1L, paste0(url_base, grade_tag), url_base)
+
+  dup <- duplicated(study_slug) | duplicated(study_slug, fromLast = TRUE)
+  if (any(dup)) {
+    study_slug[dup] <- paste0(study_slug[dup], "-r", df$Round[dup])
+  }
+
+  dup2 <- duplicated(study_slug) | duplicated(study_slug, fromLast = TRUE)
+  if (any(dup2)) {
+    for (i in which(dup2)) {
+      acr <- df$Acronym[i]
+      extra <- if (!is.na(acr) && acr != "") {
+        paste0("-", slugify_text(acr))
+      } else {
+        paste0("-", slugify_text(df$Source[i]))
+      }
+      study_slug[i] <- paste0(study_slug[i], extra)
+    }
+  }
+
+  df$country_slug <- country_slug
+  df$study_slug <- study_slug
+  # Crosstalk keys must not contain "/" (breaks filter + reactable linkage).
+  df$study_key <- gsub("/", "_", study_slug, fixed = TRUE)
+  df$Detail_url <- paste0("studies/", study_slug, ".html")
+  df
+}
+
 egra_subtask_copy <- function() {
   list(
     list_comp = list(
@@ -184,9 +294,14 @@ sort_masters <- function(masters) {
 study_detail_styles <- function() {
   HTML("
 <style>
+:root { --af-font: 'Source Sans 3', sans-serif; }
 *, *::before, *::after { box-sizing: border-box; }
+html, body,
+input, button, select, textarea,
+button.af-study-tab {
+  font-family: var(--af-font);
+}
 body {
-  font-family: 'Nunito', sans-serif;
   font-size: 16px;
   background: #FFFFFF;
   color: #1F2937;
@@ -218,7 +333,7 @@ body {
 .af-study-tab {
   background: none; border: none; border-bottom: 3px solid transparent;
   padding: 0 0 0.85rem; margin: 0 0 -1px;
-  font-family: 'Nunito', sans-serif; font-size: 1.05rem; font-weight: 800;
+  font-family: var(--af-font); font-size: 1.05rem; font-weight: 800;
   color: #0F1F38; cursor: pointer; transition: color 0.15s, border-color 0.15s;
 }
 .af-study-tab:hover { color: #C8892A; }
@@ -306,7 +421,7 @@ build_study_detail_page <- function(source_id, row, sub_tasks, task_meaning,
       tags$link(rel = "preconnect", href = "https://fonts.googleapis.com"),
       tags$link(rel = "preconnect", href = "https://fonts.gstatic.com", crossorigin = NA),
       tags$link(
-        href = "https://fonts.googleapis.com/css2?family=Nunito:ital,wght@0,400;0,600;0,700;0,800;1,400&display=swap",
+        href = "https://fonts.googleapis.com/css2?family=Source+Sans+3:ital,wght@0,400;0,500;0,600;0,700;0,800;1,400&display=swap",
         rel = "stylesheet"
       ),
       study_detail_styles()
@@ -366,6 +481,10 @@ build_study_detail_page <- function(source_id, row, sub_tasks, task_meaning,
               tags$span(class = "af-meta-value", row$Grades)
             ),
             tags$div(class = "af-meta-row",
+              tags$span(class = "af-meta-label", "Language"),
+              tags$span(class = "af-meta-value", row$Languages)
+            ),
+            tags$div(class = "af-meta-row",
               tags$span(class = "af-meta-label", "Country"),
               tags$span(class = "af-meta-value", row$Country)
             ),
@@ -407,12 +526,12 @@ document.querySelectorAll('.af-study-tab').forEach(function(btn) {
 }
 
 write_study_detail_pages <- function(browse_base, sub_tasks, task_meaning,
-                                     studies_dir, index_url, logo_uri,
+                                     studies_dir, logo_uri,
                                      file_cell, link_pill, study_type_label) {
   copy_lookup <- egra_subtask_copy()
   label_lookup <- build_task_label_lookup(task_meaning)
   dir.create(studies_dir, showWarnings = FALSE, recursive = TRUE)
-  old_files <- list.files(studies_dir, pattern = "\\.html$", full.names = TRUE)
+  old_files <- list.files(studies_dir, pattern = "\\.html$", full.names = TRUE, recursive = TRUE)
   if (length(old_files)) unlink(old_files)
 
   for (i in seq_len(nrow(browse_base))) {
@@ -421,10 +540,11 @@ write_study_detail_pages <- function(browse_base, sub_tasks, task_meaning,
     row       <- browse_base[i, ]
     page <- build_study_detail_page(
       source_id, row, sub_tasks, task_meaning,
-      index_url, logo_uri, copy_lookup, label_lookup,
+      study_index_url(slug), logo_uri, copy_lookup, label_lookup,
       file_cell, link_pill, study_type_label
     )
     outfile <- file.path(studies_dir, paste0(slug, ".html"))
+    dir.create(dirname(outfile), recursive = TRUE, showWarnings = FALSE)
     htmltools::save_html(page, file = outfile)
   }
   invisible(nrow(browse_base))
