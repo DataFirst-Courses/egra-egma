@@ -110,6 +110,130 @@ assign_study_url_slugs <- function(df) {
   df
 }
 
+clean_header_names <- function(nms) {
+  trimws(gsub("\u00a0", " ", nms, fixed = TRUE))
+}
+
+load_subtask_desc <- function(path) {
+  raw <- readxl::read_excel(path, sheet = "sub-tasks-desc")
+  names(raw) <- clean_header_names(names(raw))
+  prefix_col  <- names(raw)[grep("prefix", names(raw), ignore.case = TRUE)][1]
+  task_col    <- names(raw)[grep("^task", names(raw), ignore.case = TRUE)][1]
+  assess_col  <- names(raw)[grep("assessment", names(raw), ignore.case = TRUE)][1]
+  core_col    <- names(raw)[grep("^core", names(raw), ignore.case = TRUE)][1]
+  alt_col     <- names(raw)[grep("alternate", names(raw), ignore.case = TRUE)][1]
+
+  rows <- lapply(seq_len(nrow(raw)), function(i) {
+    prefix <- normalize_task_key(raw[[prefix_col]][i])
+    label  <- trimws(as.character(raw[[task_col]][i]))
+    if (!nzchar(prefix) || is.na(label) || label == "") return(NULL)
+    out <- data.frame(
+      task_id = prefix,
+      task_label = label,
+      assessment = if (!is.na(assess_col)) trimws(as.character(raw[[assess_col]][i])) else "",
+      core = if (!is.na(core_col)) trimws(as.character(raw[[core_col]][i])) else "",
+      stringsAsFactors = FALSE
+    )
+    if (!is.na(alt_col)) {
+      alts <- strsplit(as.character(raw[[alt_col]][i]), ",")[[1]]
+      alts <- normalize_task_key(trimws(alts))
+      alts <- alts[nzchar(alts)]
+      if (length(alts)) {
+        out <- rbind(
+          out,
+          data.frame(
+            task_id = alts,
+            task_label = label,
+            assessment = out$assessment[1],
+            core = out$core[1],
+            stringsAsFactors = FALSE
+          )
+        )
+      }
+    }
+    out
+  })
+  lookup <- do.call(rbind, rows)
+  lookup <- lookup[!is.na(lookup$task_id) & nzchar(lookup$task_id), , drop = FALSE]
+  lookup[!duplicated(lookup$task_id), , drop = FALSE]
+}
+
+load_va_matrix <- function(path) {
+  raw <- readxl::read_excel(path, sheet = "va-matrix")
+  names(raw) <- clean_header_names(names(raw))
+  prefix_col <- names(raw)[grep("prefix", names(raw), ignore.case = TRUE)][1]
+  task_col   <- names(raw)[grep("^task", names(raw), ignore.case = TRUE)][1]
+  assess_col <- names(raw)[grep("assessment", names(raw), ignore.case = TRUE)][1]
+  core_col   <- names(raw)[grep("^core", names(raw), ignore.case = TRUE)][1]
+  meta_cols  <- unique(c(assess_col, task_col, core_col, prefix_col,
+                         names(raw)[grep("alternate", names(raw), ignore.case = TRUE)]))
+  meta_cols  <- meta_cols[!is.na(meta_cols)]
+  study_cols <- setdiff(names(raw), meta_cols)
+
+  present_val <- function(x) {
+  v <- toupper(trimws(as.character(x)))
+    !is.na(v) & v %in% c("YES", "Y", "TRUE", "1")
+  }
+
+  pieces <- lapply(study_cols, function(col) {
+    data.frame(
+      matrix_col = col,
+      task_id = normalize_task_key(raw[[prefix_col]]),
+      task_label = trimws(as.character(raw[[task_col]])),
+      assessment = if (!is.na(assess_col)) trimws(as.character(raw[[assess_col]])) else "",
+      core = if (!is.na(core_col)) trimws(as.character(raw[[core_col]])) else "",
+      present = present_val(raw[[col]]),
+      stringsAsFactors = FALSE
+    )
+  })
+  out <- do.call(rbind, pieces)
+  out <- out[nzchar(out$task_id), , drop = FALSE]
+  rownames(out) <- NULL
+  out
+}
+
+assign_matrix_col <- function(df) {
+  df$matrix_col <- df$study_key
+  liberia <- grepl("^liberia_", df$study_key, fixed = FALSE) | df$Source == "liberia"
+  malawi  <- grepl("^malawi_", df$study_key, fixed = FALSE) | df$Source == "malawi"
+  df$matrix_col[liberia] <- "liberia"
+  df$matrix_col[malawi] <- "malawi"
+  ghana <- df$Source == "ghana_2013_g2" |
+    df$study_key %in% c("ghana_2013", "ghana_2013-g2")
+  df$matrix_col[ghana] <- "ghana_2013_g2"
+  df
+}
+
+study_present_subtasks <- function(matrix_long, matrix_col, desc_lookup = NULL) {
+  if (is.na(matrix_col) || !nzchar(matrix_col)) return(character(0))
+  hits <- matrix_long[matrix_long$matrix_col == matrix_col & matrix_long$present, , drop = FALSE]
+  if (!nrow(hits)) return(character(0))
+  task_ids <- unique(hits$task_id)
+  sort_task_ids(task_ids)
+}
+
+study_present_labels <- function(matrix_long, matrix_col, desc_lookup) {
+  ids <- study_present_subtasks(matrix_long, matrix_col, desc_lookup)
+  if (!length(ids)) return(character(0))
+  vapply(ids, function(id) task_label(id, desc_lookup), character(1), USE.NAMES = FALSE)
+}
+
+warn_missing_matrix_cols <- function(browse_base, matrix_long) {
+  known <- unique(matrix_long$matrix_col)
+  missing <- unique(browse_base$matrix_col[
+    !is.na(browse_base$matrix_col) &
+      nzchar(browse_base$matrix_col) &
+      !browse_base$matrix_col %in% known
+  ])
+  if (length(missing)) {
+    warning(
+      "No va-matrix column for: ", paste(missing, collapse = ", "),
+      call. = FALSE
+    )
+  }
+  invisible(missing)
+}
+
 egra_subtask_copy <- function() {
   list(
     list_comp = list(
@@ -220,12 +344,152 @@ egra_subtask_copy <- function() {
       body = paste(
         "The oral vocabulary subtask measures students' spoken vocabulary knowledge."
       )
+    ),
+    num_id = list(
+      title = "Number Identification",
+      body = paste(
+        "The number identification subtask measures whether a student can recognise and name",
+        "or select numbers. Students are presented with numbers and asked to identify them.",
+        "The score is typically the number of items answered correctly."
+      )
+    ),
+    quant_comp = list(
+      title = "Number Discrimination",
+      body = paste(
+        "The number discrimination subtask measures a student's ability to compare quantities",
+        "or identify which of two or more numbers or sets is larger, smaller, or the same.",
+        "It assesses early numeracy and magnitude understanding."
+      )
+    ),
+    addlvl1 = list(
+      title = "Addition Level 1",
+      body = paste(
+        "Addition level 1 measures a student's ability to solve basic addition problems,",
+        "usually with small numbers appropriate to the grade.",
+        "The score is the number of problems answered correctly."
+      )
+    ),
+    addlvl2 = list(
+      title = "Addition Level 2",
+      body = paste(
+        "Addition level 2 measures a student's ability to solve more difficult addition",
+        "problems than level 1, often involving larger numbers or additional steps.",
+        "The score is the number of problems answered correctly."
+      )
+    ),
+    sublvl1 = list(
+      title = "Subtraction Level 1",
+      body = paste(
+        "Subtraction level 1 measures a student's ability to solve basic subtraction problems.",
+        "The score is the number of problems answered correctly."
+      )
+    ),
+    sublvl2 = list(
+      title = "Subtraction Level 2",
+      body = paste(
+        "Subtraction level 2 measures a student's ability to solve more difficult subtraction",
+        "problems than level 1. The score is the number of problems answered correctly."
+      )
+    ),
+    miss_num = list(
+      title = "Word Problems",
+      body = paste(
+        "The word problems subtask measures a student's ability to solve short mathematics",
+        "story problems. Students must understand the problem, choose the correct operation,",
+        "and find the answer. The score is the number of problems answered correctly."
+      )
+    ),
+    word_prob = list(
+      title = "Missing Number",
+      body = paste(
+        "The missing number subtask measures a student's ability to find an unknown value",
+        "in a number sequence or equation (for example, 3 + \u25a1 = 7).",
+        "The score is the number of items answered correctly."
+      )
+    ),
+    pa_df_init_snd = list(
+      title = "Different Initial Sound",
+      body = paste(
+        "This subtask measures whether a student can identify words that begin with a",
+        "different sound from a reference word.",
+        "The score is the number of items answered correctly."
+      )
+    ),
+    pa_df_fnl_snd = list(
+      title = "Different Final Sound",
+      body = paste(
+        "This subtask measures whether a student can identify words that end with a",
+        "different sound from a reference word.",
+        "The score is the number of items answered correctly."
+      )
+    ),
+    pa_num_sound = list(
+      title = "Phoneme Segmentation",
+      body = paste(
+        "This subtask measures a student's ability to break spoken words into their",
+        "individual sounds (phonemes) and produce or count them.",
+        "The score reflects correct segmentation or sound production."
+      )
+    ),
+    dict_let = list(
+      title = "Letter Dictation",
+      body = paste(
+        "The letter dictation subtask measures a student's ability to write letters from",
+        "dictation. The assessor says a letter name or sound and the student writes the",
+        "corresponding letter. The score is the number of letters written correctly."
+      )
+    ),
+    word_dict = list(
+      title = "Word Dictation",
+      body = paste(
+        "The word dictation subtask measures a student's ability to spell words from",
+        "dictation. The assessor says a word and the student writes it.",
+        "The score is the number of words spelled correctly."
+      )
     )
   )
 }
 
 normalize_task_key <- function(x) {
   gsub("[^a-z0-9]", "", tolower(trimws(as.character(x))))
+}
+
+copy_entry <- function(task_id, copy_lookup) {
+  key <- normalize_task_key(task_id)
+  hits <- names(copy_lookup)[normalize_task_key(names(copy_lookup)) == key]
+  if (length(hits)) return(copy_lookup[[hits[1]]])
+  NULL
+}
+
+task_label <- function(task_id, desc_lookup, copy_lookup = NULL) {
+  key <- normalize_task_key(task_id)
+  if (!is.null(copy_lookup)) {
+    entry <- copy_entry(task_id, copy_lookup)
+    if (!is.null(entry)) return(entry$title)
+  }
+  hit <- desc_lookup$task_label[!is.na(desc_lookup$task_id) & desc_lookup$task_id == key]
+  if (length(hit)) return(hit[1])
+  stringr::str_to_title(gsub("_", " ", key))
+}
+
+task_description <- function(task_id, copy_lookup) {
+  entry <- copy_entry(task_id, copy_lookup)
+  if (!is.null(entry)) return(entry$body)
+  ""
+}
+
+sort_task_ids <- function(task_ids) {
+  priority <- c(
+    "list_comp", "letter", "letter_sound", "pa_init_sound", "pa_df_init_snd", "pa_df_fnl_snd",
+    "pa_num_sound", "phoneme_seg_a_en", "syllable_sound",
+    "invent_word", "fam_word", "oral_read", "read_comp", "maze",
+    "num_id", "quant_comp", "addlvl1", "addlvl2", "sublvl1", "sublvl2", "miss_num", "word_prob",
+    "dict_let", "word_dict", "vocab", "oral_vocab"
+  )
+  keys <- normalize_task_key(task_ids)
+  ord <- match(keys, priority)
+  ord[is.na(ord)] <- 1000 + seq_along(ord[is.na(ord)])
+  task_ids[order(ord, keys)]
 }
 
 build_task_label_lookup <- function(task_meaning) {
@@ -281,14 +545,7 @@ master_description <- function(master, copy_lookup) {
 }
 
 sort_masters <- function(masters) {
-  priority <- c(
-    "list_comp", "letter", "letter_sound", "pa_init_sound", "phoneme_seg_a_en",
-    "syllable_sound", "invent_word", "fam_word", "oral_read", "read_comp",
-    "maze", "vocab", "oral_vocab"
-  )
-  ord <- match(masters, priority)
-  ord[is.na(ord)] <- 1000 + seq_along(ord[is.na(ord)])
-  masters[order(ord, masters)]
+  sort_task_ids(masters)
 }
 
 study_detail_styles <- function() {
@@ -390,13 +647,12 @@ body {
 </style>")
 }
 
-build_study_detail_page <- function(source_id, row, sub_tasks, task_meaning,
-                                    index_url, logo_uri, copy_lookup, label_lookup,
+build_study_detail_page <- function(row, present_task_ids, desc_lookup, copy_lookup,
+                                    index_url, logo_uri,
                                     file_cell, link_pill, study_type_label) {
-  masters <- sort_masters(get_study_masters(source_id, sub_tasks))
-  subtask_items <- lapply(masters, function(m) {
-    title <- master_label(m, label_lookup, copy_lookup)
-    body  <- master_description(m, copy_lookup)
+  subtask_items <- lapply(present_task_ids, function(task_id) {
+    title <- task_label(task_id, desc_lookup, copy_lookup)
+    body  <- task_description(task_id, copy_lookup)
     tags$details(
       class = "af-subtask-item",
       tags$summary(title),
@@ -406,6 +662,25 @@ build_study_detail_page <- function(source_id, row, sub_tasks, task_meaning,
       )
     )
   })
+
+  subtask_summary <- if (length(present_task_ids)) {
+    paste(vapply(present_task_ids, function(id) task_label(id, desc_lookup, copy_lookup),
+                 character(1)), collapse = ", ")
+  } else {
+    "\u2014"
+  }
+
+  has_egma <- any(desc_lookup$task_id %in% present_task_ids &
+                    grepl("EGMA", desc_lookup$assessment, ignore.case = TRUE))
+  has_egra <- any(desc_lookup$task_id %in% present_task_ids &
+                    grepl("EGRA", desc_lookup$assessment, ignore.case = TRUE))
+  assessment_label <- if (has_egma && has_egra) {
+    "EGRA / EGMA"
+  } else if (has_egma) {
+    "EGMA"
+  } else {
+    "EGRA"
+  }
 
   desc <- ifelse(is.na(row$Description) || row$Description == "", "—", row$Description)
   sampling <- ifelse(is.na(row$Sampling) || row$Sampling == "", "—", row$Sampling)
@@ -448,10 +723,15 @@ build_study_detail_page <- function(source_id, row, sub_tasks, task_meaning,
           ),
           tags$div(id = "panel-about", class = "af-study-panel active",
             tags$p(desc),
-            tags$h2(class = "af-section-title", "EGRA Subtasks"),
+            tags$h2(class = "af-section-title", "Assessment Subtasks"),
             tags$p(style = "color:#64748B; font-size:0.95rem; margin-bottom:1rem;",
-              "An EGRA measures children's pre-reading and reading skills. The subtasks used in this assessment are described below."),
-            tags$div(class = "af-subtask-list", subtask_items)
+              "The subtasks included in this study round are described below."),
+            if (length(subtask_items)) {
+              tags$div(class = "af-subtask-list", subtask_items)
+            } else {
+              tags$p(style = "color:#94A3B8; font-style:italic;",
+                "Sub-task availability for this study round is not yet listed in the variable availability matrix.")
+            }
           ),
           tags$div(id = "panel-sampling", class = "af-study-panel",
             tags$h2(class = "af-section-title", "Sampling"),
@@ -485,12 +765,16 @@ build_study_detail_page <- function(source_id, row, sub_tasks, task_meaning,
               tags$span(class = "af-meta-value", row$Languages)
             ),
             tags$div(class = "af-meta-row",
+              tags$span(class = "af-meta-label", "Sub-tasks"),
+              tags$span(class = "af-meta-value", subtask_summary)
+            ),
+            tags$div(class = "af-meta-row",
               tags$span(class = "af-meta-label", "Country"),
               tags$span(class = "af-meta-value", row$Country)
             ),
             tags$div(class = "af-meta-row",
               tags$span(class = "af-meta-label", "Assessment"),
-              tags$span(class = "af-meta-value", "EGRA")
+              tags$span(class = "af-meta-value", assessment_label)
             ),
             tags$div(class = "af-meta-row",
               tags$span(class = "af-meta-label", "Study type"),
@@ -525,22 +809,23 @@ document.querySelectorAll('.af-study-tab').forEach(function(btn) {
   )
 }
 
-write_study_detail_pages <- function(browse_base, sub_tasks, task_meaning,
+write_study_detail_pages <- function(browse_base, subtask_desc, va_matrix,
                                      studies_dir, logo_uri,
                                      file_cell, link_pill, study_type_label) {
   copy_lookup <- egra_subtask_copy()
-  label_lookup <- build_task_label_lookup(task_meaning)
   dir.create(studies_dir, showWarnings = FALSE, recursive = TRUE)
   old_files <- list.files(studies_dir, pattern = "\\.html$", full.names = TRUE, recursive = TRUE)
   if (length(old_files)) unlink(old_files)
 
+  warn_missing_matrix_cols(browse_base, va_matrix)
+
   for (i in seq_len(nrow(browse_base))) {
-    source_id <- browse_base$Source[i]
-    slug      <- browse_base$study_slug[i]
-    row       <- browse_base[i, ]
+    slug <- browse_base$study_slug[i]
+    row  <- browse_base[i, ]
+    present_task_ids <- study_present_subtasks(va_matrix, row$matrix_col, subtask_desc)
     page <- build_study_detail_page(
-      source_id, row, sub_tasks, task_meaning,
-      study_index_url(slug), logo_uri, copy_lookup, label_lookup,
+      row, present_task_ids, subtask_desc, copy_lookup,
+      study_index_url(slug), logo_uri,
       file_cell, link_pill, study_type_label
     )
     outfile <- file.path(studies_dir, paste0(slug, ".html"))

@@ -6,7 +6,9 @@ Published output for GitHub Pages lives in **`docs/`**.
 ## Quick start (RStudio)
 
 1. Open **`aflearn-site.Rproj`** in RStudio.
-2. Place **`EGRA_Harmonization_Waves_Details.xlsx`** in the project root (same folder as the `.qmd` files).
+2. Place these data files in the project root (same folder as the `.qmd` files):
+   - **`EGRA_Harmonization_Waves_Details.xlsx`**
+   - **`variable-availability-matrix.xlsx`** (`va-matrix` + `sub-tasks-desc` sheets; sub-task filter and study pages)
 3. Install R packages once:
 
 ```r
@@ -90,6 +92,14 @@ If Pages settings are missing or greyed out, a **DataFirst-Courses org admin** m
 source("render_site.R")
 ```
 
+If you update only the harmonisation Excel and need to refresh sub-task availability:
+
+```bash
+python build_variable_availability_matrix.py
+```
+
+Then re-render and push `docs/` as usual.
+
 Then:
 
 ```bash
@@ -107,6 +117,8 @@ aflearn-site/
 ├── render_site.R                     # One-command render → docs/
 ├── _quarto.yml                       # Output directory: docs/
 ├── EGRA_Harmonization_Waves_Details.xlsx
+├── variable-availability-matrix.xlsx   # Sub-task availability (va-matrix + sub-tasks-desc)
+├── build_variable_availability_matrix.py  # Regenerate xlsx from harmonisation Excel
 ├── docs/                             # ← GitHub Pages publish root (committed)
 │   ├── index.html
 │   ├── studies/
