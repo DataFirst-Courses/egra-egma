@@ -1,5 +1,7 @@
 # Generates self-contained study detail HTML pages (sourced from aflearn_dataset_reference_5.qmd)
 
+AHEAD_FOOTER_LABEL <- "AHEAD \u2014 African Harmonised Early-Grade Assessments Data"
+
 AF_COUNTRY_SLUG <- c(
   CD = "drc",
   DJ = "djibouti",
@@ -73,6 +75,94 @@ study_index_url <- function(study_slug) {
   paste0(paste(rep("..", n_up), collapse = "/"), "/index.html")
 }
 
+study_favicon_url <- function(study_slug) {
+  sub("index.html$", "favicon.png", study_index_url(study_slug))
+}
+
+# ── Country-name normalisation (linking sheet uses free-text country names) ───
+normalize_country_name <- function(x) {
+  x <- tolower(trimws(as.character(x)))
+  x <- gsub("[^a-z ]", " ", x)
+  x <- gsub("\\bthe\\b", " ", x)
+  x <- gsub("\\s+", " ", x)
+  trimws(x)
+}
+
+normalize_country_to_iso <- function(country, iso_map = AF_ISO_COUNTRY) {
+  norm_target <- normalize_country_name(country)
+  norm_known  <- normalize_country_name(iso_map)
+  unname(names(iso_map)[match(norm_target, norm_known)])
+}
+
+# ── "Link to Source" data: per-study-round join key + harmonized/source vars ──
+load_linking_source <- function(path) {
+  raw <- read_excel_sheet_any(path, c("linking-to-source"))
+  names(raw) <- clean_header_names(names(raw))
+
+  out <- data.frame(
+    ISO   = normalize_country_to_iso(raw$country),
+    Year  = suppressWarnings(as.integer(raw$year)),
+    Code  = suppressWarnings(as.integer(raw$project_code)),
+    Round = suppressWarnings(as.integer(raw[["round/wave"]])),
+    school_id_harmonized  = trimws(as.character(raw$school_id_harmonized)),
+    student_id_harmonized = trimws(as.character(raw$student_id_harmonized)),
+    school_id_source      = trimws(as.character(raw$school_id_source)),
+    student_id_source     = trimws(as.character(raw$student_id_source)),
+    datafile_location     = trimws(as.character(raw$datafile_location)),
+    codebook_location      = trimws(as.character(raw$codebook_location)),
+    stringsAsFactors = FALSE
+  )
+  out <- out[!is.na(out$ISO) & !is.na(out$Year) & !is.na(out$Code) & !is.na(out$Round), , drop = FALSE]
+  out$link_key <- paste(out$ISO, out$Year, out$Code, out$Round, sep = "|")
+  rownames(out) <- NULL
+  out
+}
+
+study_link_key <- function(row) {
+  paste(row$ISO, suppressWarnings(as.integer(row$Year)),
+        suppressWarnings(as.integer(row$Code)),
+        suppressWarnings(as.integer(row$Round)), sep = "|")
+}
+
+# A handful of study-rounds share an identical ISO+project+year+round key
+# (e.g. Rwanda 2018 grades 1-3 were assessed in the same round). When the
+# linking sheet has more than one candidate row for a key, disambiguate using
+# the source data-file name already attached to this study (falls back to the
+# first candidate row when no unambiguous match is found).
+find_link_info <- function(linking_source, row) {
+  key <- study_link_key(row)
+  cand <- linking_source[linking_source$link_key == key, , drop = FALSE]
+  if (!nrow(cand)) return(NULL)
+  if (nrow(cand) == 1) return(as.list(cand[1, ]))
+
+  norm_file <- function(x) {
+    x <- tolower(gsub("[^a-z0-9]", "", as.character(x)))
+    ifelse(is.na(x), "", x)
+  }
+  target <- norm_file(row$DataFile_text %||% NA_character_)
+  if (nzchar(target)) {
+    hits <- vapply(cand$datafile_location, function(f) {
+      f2 <- norm_file(f)
+      nzchar(f2) && (grepl(f2, target, fixed = TRUE) || grepl(target, f2, fixed = TRUE))
+    }, logical(1))
+    if (sum(hits) == 1) return(as.list(cand[hits, , drop = FALSE][1, ]))
+  }
+
+  grade_hint <- regmatches(
+    tolower(paste(row$Source, row$study_slug)),
+    regexpr("g([0-9])", tolower(paste(row$Source, row$study_slug)))
+  )
+  if (length(grade_hint) && nzchar(grade_hint[[1]])) {
+    digit <- gsub("[^0-9]", "", grade_hint[[1]])
+    hits <- grepl(paste0("grade_?", digit), tolower(cand$datafile_location))
+    if (sum(hits) == 1) return(as.list(cand[hits, , drop = FALSE][1, ]))
+  }
+
+  as.list(cand[1, , drop = FALSE])
+}
+
+`%||%` <- function(x, y) if (is.null(x) || length(x) == 0 || (length(x) == 1 && is.na(x))) y else x
+
 assign_study_url_slugs <- function(df) {
   country_slug <- mapply(
     country_url_slug, df$Country, df$ISO, df$Source,
@@ -112,6 +202,20 @@ assign_study_url_slugs <- function(df) {
 
 clean_header_names <- function(nms) {
   trimws(gsub("\u00a0", " ", nms, fixed = TRUE))
+}
+
+# ── Sheet-name resolver (workbook sheets get renamed over time) ───────────────
+read_excel_sheet_any <- function(path, candidates, ...) {
+  available <- readxl::excel_sheets(path)
+  hit <- candidates[candidates %in% available][1]
+  if (is.na(hit)) {
+    stop(
+      "None of the candidate sheet names found in '", path, "': ",
+      paste(candidates, collapse = ", "),
+      ". Available sheets: ", paste(available, collapse = ", ")
+    )
+  }
+  readxl::read_excel(path, sheet = hit, ...)
 }
 
 load_subtask_desc <- function(path) {
@@ -232,6 +336,104 @@ warn_missing_matrix_cols <- function(browse_base, matrix_long) {
     )
   }
   invisible(missing)
+}
+
+# ── "Link to Source" code generators ───────────────────────────────────────
+link_var <- function(x, fallback = "<not yet documented>") {
+  if (is.null(x) || (length(x) == 1 && (is.na(x) || x == ""))) fallback else x
+}
+
+build_id_anatomy_segments <- function(row) {
+  round_val <- if (is.na(row$Round) || row$Round == "" || row$Round == "—") "?" else as.character(row$Round)
+  list(
+    list(label = "Country (ISO)", value = row$ISO,  known = TRUE),
+    list(label = "Project",       value = row$Code, known = TRUE),
+    list(label = "Round",         value = round_val, known = TRUE),
+    list(label = "School code",   value = "xxx",     known = FALSE),
+    list(label = "Student code",  value = "xxx",      known = FALSE)
+  )
+}
+
+# Small inline syntax-highlighting helpers shared by both code generators.
+# Returns plain HTML (string); the caller must insert it via htmltools::HTML().
+.code_tok_esc <- function(x) htmltools::htmlEscape(as.character(x))
+.code_tok_fn  <- function(x) sprintf('<span class="tok-fn">%s</span>', .code_tok_esc(x))
+.code_tok_str <- function(x) sprintf('<span class="tok-str">&quot;%s&quot;</span>', .code_tok_esc(x))
+.code_tok_num <- function(x) sprintf('<span class="tok-num">%s</span>', .code_tok_esc(x))
+.code_tok_var <- function(x) sprintf('<span class="tok-var">%s</span>', .code_tok_esc(x))
+.code_tok_com <- function(x, prefix) sprintf('<span class="tok-com">%s %s</span>', prefix, .code_tok_esc(x))
+
+build_join_code_r <- function(info, row) {
+  school_h <- link_var(info$school_id_harmonized, "school_id")
+  student_h <- link_var(info$student_id_harmonized, "student_id")
+  school_s <- link_var(info$school_id_source, "school_id_source")
+  student_s <- link_var(info$student_id_source, "student_id_source")
+  src_file <- link_var(info$datafile_location, "source_survey_file")
+
+  fn <- .code_tok_fn; str_ <- .code_tok_str; num <- .code_tok_num
+  var_ <- .code_tok_var; com <- function(x) .code_tok_com(x, "#")
+
+  paste(
+    sprintf("%s(dplyr)", fn("library")),
+    sprintf("%s(haven)", fn("library")),
+    "",
+    com("AHEAD harmonised file (rename to wherever you saved it)"),
+    sprintf("ahead  &lt;- %s(%s)", fn("read_dta"), str_("ahead-v1.dta")),
+    "",
+    com("Source survey microdata for this study round, from the codebook/DataLumos link"),
+    sprintf("source &lt;- %s(%s)", fn("read_dta"), str_(src_file)),
+    "",
+    com("1. Identify the study round"),
+    "study_round &lt;- ahead |&gt;",
+    sprintf("  %s(", fn("filter")),
+    sprintf("    country_iso == %s,", str_(row$ISO)),
+    sprintf("    project     == %s,", str_(row$Code)),
+    sprintf("    year        == %s,", num(as.integer(row$Year))),
+    sprintf("    round       == %s", num(as.integer(row$Round))),
+    "  )",
+    "",
+    com("2. Join back to the source survey on the school + student key crosswalk"),
+    "linked &lt;- study_round |&gt;",
+    sprintf("  %s(", fn("left_join")),
+    "    source,",
+    sprintf(
+      "    by = c(%s = %s, %s = %s)",
+      str_(school_h), str_(school_s), str_(student_h), str_(student_s)
+    ),
+    "  )",
+    sep = "\n"
+  )
+}
+
+build_join_code_stata <- function(info, row) {
+  school_h <- link_var(info$school_id_harmonized, "school_id")
+  student_h <- link_var(info$student_id_harmonized, "student_id")
+  school_s <- link_var(info$school_id_source, "school_id_source")
+  student_s <- link_var(info$student_id_source, "student_id_source")
+  src_file <- link_var(info$datafile_location, "source_survey_file")
+
+  fn <- .code_tok_fn; str_ <- .code_tok_str; num <- .code_tok_num
+  var_ <- .code_tok_var; com <- function(x) .code_tok_com(x, "*")
+
+  paste(
+    com("AHEAD harmonised file (rename to wherever you saved it)"),
+    sprintf("%s %s, %s", fn("use"), str_("ahead-v1.dta"), fn("clear")),
+    "",
+    com("1. Keep only this study round"),
+    sprintf("%s if country_iso == %s &amp; project == %s &amp; ///", fn("keep"), str_(row$ISO), str_(row$Code)),
+    sprintf("       year == %s &amp; round == %s", num(as.integer(row$Year)), num(as.integer(row$Round))),
+    "",
+    com("2. Rename AHEAD keys to match the source survey's key names"),
+    sprintf("%s %s %s", fn("rename"), var_(school_h), var_(school_s)),
+    sprintf("%s %s %s", fn("rename"), var_(student_h), var_(student_s)),
+    "",
+    com("3. Merge with the source survey microdata (from the codebook/DataLumos link)"),
+    sprintf(
+      "%s 1:1 %s %s %s %s",
+      fn("merge"), var_(school_s), var_(student_s), fn("using"), str_(src_file)
+    ),
+    sep = "\n"
+  )
 }
 
 egra_subtask_copy <- function() {
@@ -640,16 +842,183 @@ body {
   padding: 0.9rem 2rem 1.5rem; font-size: 0.82rem; color: #9CA3AF;
   border-top: 1px solid #E5E7EB; background: #FFFFFF;
 }
+.af-link-pills { display: flex; gap: 0.5rem; flex-wrap: wrap; margin: 0.5rem 0 0.75rem; }
+.af-link-pill {
+  background: #F0F4FF; border: 1px solid #C7D7F5; color: #0F1F38;
+  font-size: 0.82rem; font-weight: 700; padding: 0.3rem 0.75rem; border-radius: 999px;
+}
+.af-id-anatomy {
+  display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap;
+  margin: 0.5rem 0 1.5rem;
+}
+.af-id-segment {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  min-width: 64px; padding: 0.55rem 0.7rem; border-radius: 8px; text-align: center;
+}
+.af-id-segment.known { background: #100A78; color: #fff; }
+.af-id-segment.unknown {
+  background: #F8FAFC; color: #94A3B8; border: 1.5px dashed #CBD5E1;
+}
+.af-id-value {
+  font-family: ui-monospace, monospace; font-size: 1.05rem; font-weight: 800; letter-spacing: 0.03em;
+}
+.af-id-label {
+  font-size: 0.62rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;
+  margin-top: 0.2rem; opacity: 0.85;
+}
+.af-id-plus { font-size: 1.1rem; font-weight: 800; color: #CBD5E1; }
+.af-crosswalk {
+  border: 1px solid #E5E7EB; border-radius: 8px; overflow: hidden; margin-top: 0.5rem;
+}
+.af-crosswalk-row {
+  display: grid; grid-template-columns: 1fr 32px 1fr; align-items: center;
+  padding: 0.65rem 1rem; border-bottom: 1px solid #E5E7EB; font-size: 0.9rem;
+}
+.af-crosswalk-row:last-child { border-bottom: none; }
+.af-crosswalk-head {
+  background: #F8FAFC; color: #64748B; font-weight: 700; font-size: 0.72rem;
+  text-transform: uppercase; letter-spacing: 0.05em;
+}
+.af-crosswalk-var { font-family: ui-monospace, monospace; font-weight: 700; color: #06003E; }
+.af-crosswalk-arrow { text-align: center; color: #C8892A; font-weight: 700; }
+.af-code-tabs { display: flex; gap: 0.5rem; margin: 0.5rem 0 0; }
+.af-code-tab {
+  background: #F8FAFC; border: 1px solid #E5E7EB; border-bottom: none;
+  border-radius: 6px 6px 0 0; padding: 0.45rem 1rem; font-family: var(--af-font);
+  font-size: 0.85rem; font-weight: 800; color: #64748B; cursor: pointer;
+}
+.af-code-tab.active { background: #282C34; color: #fff; border-color: #282C34; }
+.af-code-panel { display: none; }
+.af-code-panel.active { display: block; }
+.af-code-wrap { position: relative; }
+.af-code {
+  font-family: ui-monospace, monospace; font-size: 12.5px; color: #ABB2BF;
+  background: #282C34; border-radius: 0 8px 8px 8px; padding: 1.1rem 1.1rem 0.95rem;
+  white-space: pre-wrap; word-break: break-word; line-height: 1.7; margin: 0 0 1.25rem;
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.18);
+}
+.af-code .tok-fn  { color: #61AFEF; font-weight: 700; }
+.af-code .tok-str { color: #98C379; }
+.af-code .tok-num { color: #D19A66; }
+.af-code .tok-var { color: #E5C07B; }
+.af-code .tok-com { color: #7F848E; font-style: italic; }
+.af-copy-btn {
+  position: absolute; top: 0.6rem; right: 0.6rem;
+  background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.18);
+  color: #ABB2BF; font-family: var(--af-font); font-size: 0.72rem; font-weight: 700;
+  padding: 0.3rem 0.65rem; border-radius: 5px; cursor: pointer;
+}
+.af-copy-btn:hover { background: rgba(255,255,255,0.18); color: #fff; }
 @media (max-width: 900px) {
   .af-study-layout { grid-template-columns: 1fr; padding: 1.25rem 1rem 2rem; }
   .af-logo-aflearn { height: 72px; }
+  .af-crosswalk-row { grid-template-columns: 1fr 24px 1fr; font-size: 0.8rem; }
 }
 </style>")
 }
 
+# ── "Link to Source" panel ─────────────────────────────────────────────────
+link_panel_html <- function(row, link_info, file_cell, link_pill) {
+  if (is.null(link_info)) {
+    return(
+      tags$div(id = "panel-link", class = "af-study-panel",
+        tags$h2(class = "af-section-title", "Link to Source"),
+        tags$p(style = "color:#94A3B8; font-style:italic;",
+          "Source-linking details for this assessment survey are not yet available.")
+      )
+    )
+  }
+
+  segments <- build_id_anatomy_segments(row)
+  seg_tags <- list()
+  for (i in seq_along(segments)) {
+    seg <- segments[[i]]
+    seg_tags[[length(seg_tags) + 1]] <- tags$div(
+      class = paste("af-id-segment", if (seg$known) "known" else "unknown"),
+      tags$span(class = "af-id-value", seg$value),
+      tags$span(class = "af-id-label", seg$label)
+    )
+    if (i < length(segments)) {
+      seg_tags[[length(seg_tags) + 1]] <- tags$div(class = "af-id-plus", "+")
+    }
+  }
+
+  pill_row <- tags$div(
+    class = "af-link-pills",
+    tags$span(class = "af-link-pill", glue("{row$Country} ({row$ISO})")),
+    tags$span(class = "af-link-pill", glue("Year {row$Year}")),
+    tags$span(class = "af-link-pill", glue("Project {row$Code}")),
+    tags$span(class = "af-link-pill", glue("Round/Wave {row$Round}"))
+  )
+
+  crosswalk <- tags$div(
+    class = "af-crosswalk",
+    tags$div(class = "af-crosswalk-row af-crosswalk-head",
+      tags$span("AHEAD variable"), tags$span(""), tags$span("Source variable")
+    ),
+    tags$div(class = "af-crosswalk-row",
+      tags$span(class = "af-crosswalk-var", link_var(link_info$school_id_harmonized, "school_id")),
+      tags$span(class = "af-crosswalk-arrow", "\u2192"),
+      tags$span(class = "af-crosswalk-var", link_var(link_info$school_id_source, "not yet documented"))
+    ),
+    tags$div(class = "af-crosswalk-row",
+      tags$span(class = "af-crosswalk-var", link_var(link_info$student_id_harmonized, "student_id")),
+      tags$span(class = "af-crosswalk-arrow", "\u2192"),
+      tags$span(class = "af-crosswalk-var", link_var(link_info$student_id_source, "not yet documented"))
+    )
+  )
+
+  code_r     <- build_join_code_r(link_info, row)
+  code_stata <- build_join_code_stata(link_info, row)
+
+  tags$div(id = "panel-link", class = "af-study-panel",
+    tags$p(
+      "Use this recipe to merge AHEAD's harmonised records for this assessment ",
+      "survey back to the original source microdata \u2014 for example, to pull in ",
+      "socio-economic variables that were not part of the harmonisation."
+    ),
+    tags$h2(class = "af-section-title", "1. Identify the study round"),
+    pill_row,
+    tags$p(style = "color:#64748B; font-size:0.9rem; margin:0.75rem 0;",
+      "The harmonised student ID below encodes country, project and round. The ",
+      "school and student segments (in grey) are unique per record and are not shown here."),
+    tags$div(class = "af-id-anatomy", seg_tags),
+
+    tags$h2(class = "af-section-title", "2. Key crosswalk"),
+    crosswalk,
+    tags$div(
+      style = "margin-top:0.9rem; display:flex; gap:0.6rem; flex-wrap:wrap;",
+      file_cell(row$DataFile_text, row$DataFile_url),
+      file_cell(row$Codebook_text, row$Codebook_url)
+    ),
+
+    tags$h2(class = "af-section-title", "3. Join code"),
+    tags$div(
+      class = "af-code-tabs",
+      tags$button(type = "button", class = "af-code-tab active", `data-lang` = "stata", "Stata"),
+      tags$button(type = "button", class = "af-code-tab", `data-lang` = "r", "R")
+    ),
+    tags$div(class = "af-code-panel active", `data-lang` = "stata",
+      tags$div(
+        class = "af-code-wrap",
+        tags$button(type = "button", class = "af-copy-btn", "Copy"),
+        tags$pre(class = "af-code", HTML(code_stata))
+      )
+    ),
+    tags$div(class = "af-code-panel", `data-lang` = "r",
+      tags$div(
+        class = "af-code-wrap",
+        tags$button(type = "button", class = "af-copy-btn", "Copy"),
+        tags$pre(class = "af-code", HTML(code_r))
+      )
+    )
+  )
+}
+
 build_study_detail_page <- function(row, present_task_ids, desc_lookup, copy_lookup,
                                     index_url, logo_uri,
-                                    file_cell, link_pill, study_type_label) {
+                                    file_cell, link_pill, study_type_label,
+                                    link_info = NULL) {
   subtask_items <- lapply(present_task_ids, function(task_id) {
     title <- task_label(task_id, desc_lookup, copy_lookup)
     body  <- task_description(task_id, copy_lookup)
@@ -662,13 +1031,6 @@ build_study_detail_page <- function(row, present_task_ids, desc_lookup, copy_loo
       )
     )
   })
-
-  subtask_summary <- if (length(present_task_ids)) {
-    paste(vapply(present_task_ids, function(id) task_label(id, desc_lookup, copy_lookup),
-                 character(1)), collapse = ", ")
-  } else {
-    "\u2014"
-  }
 
   has_egma <- any(desc_lookup$task_id %in% present_task_ids &
                     grepl("EGMA", desc_lookup$assessment, ignore.case = TRUE))
@@ -692,7 +1054,8 @@ build_study_detail_page <- function(row, present_task_ids, desc_lookup, copy_loo
     tags$head(
       tags$meta(charset = "UTF-8"),
       tags$meta(name = "viewport", content = "width=device-width, initial-scale=1"),
-      tags$title(title_text),
+      tags$title(glue("{title_text} | AHEAD")),
+      tags$link(rel = "icon", type = "image/png", href = study_favicon_url(row$study_slug)),
       tags$link(rel = "preconnect", href = "https://fonts.googleapis.com"),
       tags$link(rel = "preconnect", href = "https://fonts.gstatic.com", crossorigin = NA),
       tags$link(
@@ -708,7 +1071,7 @@ build_study_detail_page <- function(row, present_task_ids, desc_lookup, copy_loo
       ),
       tags$div(
         class = "af-study-hero",
-        tags$a(class = "af-back-link", href = index_url, "\u2190 All study rounds"),
+        tags$a(class = "af-back-link", href = index_url, "\u2190 All assessment surveys"),
         tags$h1(title_text)
       ),
       tags$div(
@@ -719,18 +1082,19 @@ build_study_detail_page <- function(row, present_task_ids, desc_lookup, copy_loo
             class = "af-study-tabs",
             `aria-label` = "Study sections",
             tags$button(type = "button", class = "af-study-tab active", `data-panel` = "about", "About the Program"),
-            tags$button(type = "button", class = "af-study-tab", `data-panel` = "sampling", "Sampling Description")
+            tags$button(type = "button", class = "af-study-tab", `data-panel` = "sampling", "Sampling Description"),
+            tags$button(type = "button", class = "af-study-tab", `data-panel` = "link", "Link to Source")
           ),
           tags$div(id = "panel-about", class = "af-study-panel active",
             tags$p(desc),
             tags$h2(class = "af-section-title", "Assessment Subtasks"),
             tags$p(style = "color:#64748B; font-size:0.95rem; margin-bottom:1rem;",
-              "The subtasks included in this study round are described below."),
+              "The subtasks included in this assessment survey are described below."),
             if (length(subtask_items)) {
               tags$div(class = "af-subtask-list", subtask_items)
             } else {
               tags$p(style = "color:#94A3B8; font-style:italic;",
-                "Sub-task availability for this study round is not yet listed in the variable availability matrix.")
+                "Sub-task availability for this assessment survey is not yet listed in the variable availability matrix.")
             }
           ),
           tags$div(id = "panel-sampling", class = "af-study-panel",
@@ -746,7 +1110,8 @@ build_study_detail_page <- function(row, present_task_ids, desc_lookup, copy_loo
             tags$div(file_cell(row$DataFile_text, row$DataFile_url)),
             tags$h2(class = "af-section-title", "Codebook"),
             tags$div(file_cell(row$Codebook_text, row$Codebook_url))
-          )
+          ),
+          link_panel_html(row, link_info, file_cell, link_pill)
         ),
         tags$aside(
           class = "af-study-meta",
@@ -763,10 +1128,6 @@ build_study_detail_page <- function(row, present_task_ids, desc_lookup, copy_loo
             tags$div(class = "af-meta-row",
               tags$span(class = "af-meta-label", "Language"),
               tags$span(class = "af-meta-value", row$Languages)
-            ),
-            tags$div(class = "af-meta-row",
-              tags$span(class = "af-meta-label", "Sub-tasks"),
-              tags$span(class = "af-meta-value", subtask_summary)
             ),
             tags$div(class = "af-meta-row",
               tags$span(class = "af-meta-label", "Country"),
@@ -791,7 +1152,7 @@ build_study_detail_page <- function(row, present_task_ids, desc_lookup, copy_loo
       ),
       tags$div(
         class = "af-footer",
-        tags$strong("AFLearn Harmonised EGRA/EGMA Dataset"),
+        tags$strong(AHEAD_FOOTER_LABEL),
         " \u00b7 DataFirst, University of Cape Town"
       ),
       tags$script(HTML("
@@ -804,6 +1165,46 @@ document.querySelectorAll('.af-study-tab').forEach(function(btn) {
     document.getElementById('panel-' + panel).classList.add('active');
   });
 });
+
+document.querySelectorAll('.af-code-tab').forEach(function(btn) {
+  btn.addEventListener('click', function() {
+    var lang = btn.getAttribute('data-lang');
+    var scope = btn.closest('.af-study-panel') || document;
+    scope.querySelectorAll('.af-code-tab').forEach(function(b) { b.classList.remove('active'); });
+    scope.querySelectorAll('.af-code-panel').forEach(function(p) { p.classList.remove('active'); });
+    btn.classList.add('active');
+    var target = scope.querySelector('.af-code-panel[data-lang=\"' + lang + '\"]');
+    if (target) target.classList.add('active');
+  });
+});
+
+document.querySelectorAll('.af-copy-btn').forEach(function(btn) {
+  btn.addEventListener('click', function() {
+    var code = btn.parentElement.querySelector('.af-code');
+    if (!code) return;
+    var text = code.textContent;
+    var done = function() {
+      var original = btn.textContent;
+      btn.textContent = 'Copied!';
+      setTimeout(function() { btn.textContent = original; }, 1500);
+    };
+    var fallbackCopy = function() {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy'); done(); } catch (e) {}
+      document.body.removeChild(ta);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done).catch(fallbackCopy);
+    } else {
+      fallbackCopy();
+    }
+  });
+});
 "))
     )
   )
@@ -811,7 +1212,8 @@ document.querySelectorAll('.af-study-tab').forEach(function(btn) {
 
 write_study_detail_pages <- function(browse_base, subtask_desc, va_matrix,
                                      studies_dir, logo_uri,
-                                     file_cell, link_pill, study_type_label) {
+                                     file_cell, link_pill, study_type_label,
+                                     linking_source = NULL) {
   copy_lookup <- egra_subtask_copy()
   dir.create(studies_dir, showWarnings = FALSE, recursive = TRUE)
   old_files <- list.files(studies_dir, pattern = "\\.html$", full.names = TRUE, recursive = TRUE)
@@ -823,10 +1225,12 @@ write_study_detail_pages <- function(browse_base, subtask_desc, va_matrix,
     slug <- browse_base$study_slug[i]
     row  <- browse_base[i, ]
     present_task_ids <- study_present_subtasks(va_matrix, row$matrix_col, subtask_desc)
+    link_info <- if (!is.null(linking_source)) find_link_info(linking_source, row) else NULL
     page <- build_study_detail_page(
       row, present_task_ids, subtask_desc, copy_lookup,
       study_index_url(slug), logo_uri,
-      file_cell, link_pill, study_type_label
+      file_cell, link_pill, study_type_label,
+      link_info = link_info
     )
     outfile <- file.path(studies_dir, paste0(slug, ".html"))
     dir.create(dirname(outfile), recursive = TRUE, showWarnings = FALSE)

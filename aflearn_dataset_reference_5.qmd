@@ -1,5 +1,5 @@
 ---
-title: ""
+title: "AHEAD"
 format:
   html:
     self-contained: true
@@ -8,6 +8,7 @@ format:
     theme: none
     include-in-header:
       text: |
+        <link rel="icon" type="image/png" href="favicon.png">
         <link rel="preconnect" href="https://fonts.googleapis.com">
         <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
         <link href="https://fonts.googleapis.com/css2?family=Source+Sans+3:ital,wght@0,400;0,500;0,600;0,700;0,800;1,400&display=swap" rel="stylesheet">
@@ -51,6 +52,10 @@ if (is.na(VA_PATH)) {
 PUBLISH_DIR <- Sys.getenv("AFLEARN_PUBLISH_DIR", unset = "docs")
 STUDIES_DIR <- file.path(PUBLISH_DIR, "studies")
 dir.create(STUDIES_DIR, recursive = TRUE, showWarnings = FALSE)
+dir.create(PUBLISH_DIR, recursive = TRUE, showWarnings = FALSE)
+
+AFLEARN_LOGO_PATH <- "AFLEARN logo transparent.png"
+invisible(file.copy(AFLEARN_LOGO_PATH, file.path(PUBLISH_DIR, "favicon.png"), overwrite = TRUE))
 
 HARMONISED_DATA_URL <- "https://www.datafirst.uct.ac.za/dataportal/index.php"
 AF_NAVY_L1 <- "#080056"  # logo bar (darkest layer)
@@ -168,8 +173,8 @@ projects <- read_excel(EXCEL_PATH, sheet = "Project description") |>
     DataLumos = datalumos_urls[proj_key]
   )
 
-# ── Read study rounds sheet ────────────────────────────────────────────────────
-rounds_raw <- read_excel(EXCEL_PATH, sheet = "Study_rounds")
+# ── Read study rounds sheet (sheet was renamed; accept either name) ───────────
+rounds_raw <- read_excel_sheet_any(EXCEL_PATH, c("Study_rounds", "assessment-surveys"))
 
 rounds <- rounds_raw |>
   filter(!is.na(country_iso) & country_iso != "") |>
@@ -240,6 +245,7 @@ browse_base <- browse_base |>
 
 subtask_desc <- load_subtask_desc(VA_PATH)
 va_matrix    <- load_va_matrix(VA_PATH)
+linking_source <- load_linking_source(EXCEL_PATH)
 
 browse_base <- assign_study_url_slugs(browse_base)
 browse_base <- assign_matrix_col(browse_base)
@@ -292,7 +298,14 @@ browse_sd <- SharedData$new(browse_sd_data, key = ~study_key, group = "af_studie
 browse_filter_sd <- SharedData$new(browse_filter, key = ~study_key, group = "af_studies")
 browse_language_filter_sd <- SharedData$new(browse_language_filter, key = ~study_key, group = "af_studies")
 browse_subtask_filter_sd <- SharedData$new(browse_subtask_filter, key = ~study_key, group = "af_studies")
-n_studies <- nrow(browse_base)
+
+AHEAD_TITLE     <- "AHEAD"
+AHEAD_FULL_NAME <- "African Harmonised Early-Grade Assessments Data"
+AHEAD_FOOTER_LABEL <- paste0(AHEAD_TITLE, " \u2014 ", AHEAD_FULL_NAME)
+AHEAD_N_PERSONS <- "130 000"
+
+n_countries <- dplyr::n_distinct(browse_base$Country)
+n_studies   <- nrow(browse_base)
 ```
 
 ```{r helpers}
@@ -445,7 +458,7 @@ search_box <- div(
 ```
 
 ```{r header}
-aflearn_logo <- knitr::image_uri("AFLEARN logo transparent.png")
+aflearn_logo <- knitr::image_uri(AFLEARN_LOGO_PATH)
 
 div(
   div(class = "af-logobar",
@@ -454,15 +467,15 @@ div(
   div(class = "af-header",
     div(class = "af-header-inner",
       div(class = "af-brand",
-        span("Harmonised EGRA/EGMA Dataset", class = "af-page-title"),
-        span("Project & Study Rounds Reference", class = "af-subtitle")
+        span(AHEAD_TITLE, class = "af-page-title"),
+        span(AHEAD_FULL_NAME, class = "af-subtitle")
       ),
       div(class = "af-header-actions",
         tags$a(
           href = HARMONISED_DATA_URL,
           target = "_blank",
           class = "af-cta-btn",
-          "Access harmonised dataset"
+          "Access AHEAD dataset"
         ),
         div(class = "af-meta",
           span("Source file last updated", class = "af-meta-label"),
@@ -471,8 +484,17 @@ div(
       )
     ),
     p(class = "af-description",
-      "Browse EGRA/EGMA study rounds by country. Click a row for project details, ",
-      tags$code("svyset"), " commands, and DataLumos links."
+      "AHEAD is dedicated to providing open access to early-grade reading and ",
+      "mathematics assessments from across Africa. The project aims to preserve ",
+      "foundational-learning data and documentation, harmonise foundational-learning ",
+      "data, and disseminate data free of charge."
+    ),
+    p(class = "af-stats",
+      tags$strong(glue("{n_countries} countries")),
+      " \u00b7 ",
+      tags$strong(glue("{n_studies} early-grade assessment surveys")),
+      " \u00b7 ",
+      tags$strong(glue("over {AHEAD_N_PERSONS} person records"))
     )
   )
 )
@@ -488,7 +510,7 @@ browse_filters <- div(
   filter_accordion("Sub-task", "filter-subtask", browse_subtask_filter_sd, "Subtask"),
   filter_accordion("Study type", "filter-study-type", browse_sd, "Study_Type_Label"),
   p(class = "af-filter-hint",
-    glue("{n_studies} study rounds · click a row to open its detail page"))
+    glue("{n_studies} assessment surveys · click a row to open its detail page"))
 )
 
 browse_table <- reactable(
@@ -594,33 +616,20 @@ browse_table <- reactable(
 # reactable serializes slash-based row labels into crosstalkKey as a named dict;
 # filters expect a plain vector keyed by study_key or the table will not render.
 browse_table$x$tag$attribs$crosstalkKey <- as.list(as.character(browse_base$study_key))
-browse_table$x$tag$attribs$detailUrls <- as.character(browse_base$Detail_url)
 
 browse_table <- htmlwidgets::onRender(
   browse_table,
   "
   function(el, x) {
-    var allUrls = (x.tag && x.tag.attribs && x.tag.attribs.detailUrls) || [];
-    function rowUrls() {
-      if (typeof Reactable === 'undefined') return allUrls;
-      var state = Reactable.getState('browse-table');
-      if (state && state.data && state.data.length) {
-        var fromState = state.data.map(function(r) { return r.Detail_url; });
-        if (fromState[0]) return fromState;
-      }
-      return allUrls;
-    }
     function rowUrl(row) {
-      var u = row.getAttribute('data-detail-url');
-      if (u) return u;
       var a = row.querySelector('a.af-study-link, a[href*=\"studies/\"]');
-      return a ? a.getAttribute('href') : '';
+      if (a) return a.getAttribute('href') || '';
+      return row.getAttribute('data-detail-url') || '';
     }
     function syncRowUrls() {
-      var urls = rowUrls();
       var groups = el.querySelectorAll('.rt-tbody .rt-tr-group');
-      groups.forEach(function(g, i) {
-        var url = urls[i] || '';
+      groups.forEach(function(g) {
+        var url = rowUrl(g);
         if (url) {
           g.style.cursor = 'pointer';
           g.setAttribute('data-detail-url', url);
@@ -665,21 +674,22 @@ div(
   ),
   div(
     class = "af-main",
-    div(class = "af-main-title", "Study Rounds"),
+    div(class = "af-main-title", "Assessment Surveys"),
     browse_table
   )
 )
 ```
 
 ```{r generate-study-pages}
-study_logo <- knitr::image_uri("AFLEARN logo transparent.png")
+study_logo <- knitr::image_uri(AFLEARN_LOGO_PATH)
 write_study_detail_pages(
   browse_base, subtask_desc, va_matrix,
   studies_dir = STUDIES_DIR,
   logo_uri = study_logo,
   file_cell = file_cell,
   link_pill = link_pill,
-  study_type_label = study_type_label
+  study_type_label = study_type_label,
+  linking_source = linking_source
 )
 ```
 
@@ -736,7 +746,7 @@ body {
   gap: 1rem; margin-bottom: 0.75rem;
 }
 .af-brand    { display: flex; flex-direction: column; gap: 0.25rem; }
-.af-page-title { font-size: 1.35rem; font-weight: 700; color: #FFFFFF; letter-spacing: 0.02em; }
+.af-page-title { font-size: 2.5rem; font-weight: 800; color: #FFFFFF; letter-spacing: 0.04em; line-height: 1.1; }
 .af-subtitle { font-size: 1.05rem; font-weight: 400; color: #94A3B8; }
 .af-header-actions {
   display: flex; flex-direction: column; align-items: flex-end; gap: 0.65rem;
@@ -754,6 +764,14 @@ body {
 .af-meta-label { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.09em; color: #64748B; }
 .af-meta-value { font-size: 0.9rem; font-weight: 500; color: #94A3B8; }
 .af-description { font-size: 1rem; color: #94A3B8; line-height: 1.65; margin: 0; max-width: 85ch; }
+.af-stats {
+  font-size: 1rem;
+  color: #CBD5E1;
+  line-height: 1.65;
+  margin: 0.75rem 0 0;
+  max-width: 85ch;
+}
+.af-stats strong { color: #FFFFFF; font-weight: 700; }
 .af-description code {
   font-family: ui-monospace, monospace;
   background: rgba(255,255,255,0.15); color: #FFFFFF;
@@ -1099,7 +1117,7 @@ if (window.HTMLWidgets) {
 </div>
 
 <div class="af-footer">
-  <strong>AFLearn Harmonised EGRA/EGMA Dataset</strong> ·
+  <strong>AHEAD — African Harmonised Early-Grade Assessments Data</strong> ·
   DataFirst, University of Cape Town ·
   Access the harmonised dataset via the
   <a href="https://www.datafirst.uct.ac.za/dataportal/index.php" target="_blank" style="color:#06003E; text-decoration:none;">DataFirst Data Portal</a> ·
