@@ -252,8 +252,39 @@ body {
         <div id="panel-sampling" class="af-study-panel">
           <h2 class="af-section-title">Sampling</h2>
           <p>Three-stage cluster design: counties -&gt; schools -&gt; pupils. Stage 1: 26 of 47 counties selected, spanning all 8 former provinces. Stage 2: 204 schools selected proportionally within sampled counties, with independent samples from public-school and APBET (Alternative Provision of Basic Education and Training) sampling frames (national frame: 22,154 public and 1,000 APBET schools). The same 204 schools were followed across evaluation rounds (school panel); a new pupil sample was drawn in each round. Stage 3: 24 pupils per school—12 in Class 1 and 12 in Class 2, with 6 boys and 6 girls in each class, selected for assessment. Harmonized pool waves (Table 2): 2015 baseline (4,866 pupils; Grades 1–2), 2016 midline (4,671), 2019 endline (4,850). Designed to support nationally representative estimates of early-grade pupils in public and APBET schools; confirm weights (wt_final) and svyset against the Tusome evaluation codebook. school_id is not comparable across Kenya 2015–2019 in this release.</p>
-          <h2 class="af-section-title">svyset command</h2>
-          <pre class="af-svyset">svyset stage1 [pweight=wt_final], strata(strata1) fpc(fpc1) || stage2, strata(strata2) fpc(fpc2) singleunit(scaled) vce(linearized)</pre>
+          <h2 class="af-section-title">Survey design (svyset)</h2>
+          <div>
+            <div class="af-code-tabs">
+              <button type="button" class="af-code-tab active" data-lang="stata">Stata</button>
+              <button type="button" class="af-code-tab" data-lang="r">R</button>
+            </div>
+            <div class="af-code-panel active" data-lang="stata">
+              <div class="af-code-wrap">
+                <button type="button" class="af-copy-btn">Copy</button>
+                <pre class="af-code"><span class="tok-fn">svyset</span> <span class="tok-var">stage1</span> [<span class="tok-fn">pweight</span>=<span class="tok-var">wt_final</span>], <span class="tok-fn">strata</span>(<span class="tok-var">strata1</span>) <span class="tok-fn">fpc</span>(<span class="tok-var">fpc1</span>) <span class="tok-com">||</span> <span class="tok-var">stage2</span>, <span class="tok-fn">strata</span>(<span class="tok-var">strata2</span>) <span class="tok-fn">fpc</span>(<span class="tok-var">fpc2</span>) <span class="tok-fn">singleunit</span>(<span class="tok-var">scaled</span>) <span class="tok-fn">vce</span>(<span class="tok-var">linearized</span>)</pre>
+              </div>
+            </div>
+            <div class="af-code-panel" data-lang="r">
+              <div class="af-code-wrap">
+                <button type="button" class="af-copy-btn">Copy</button>
+                <pre class="af-code"><span class="tok-com"># `ahead`: your AHEAD harmonised data frame for this assessment survey</span>
+<span class="tok-fn">library</span>(survey)
+
+<span class="tok-com"># singleunit(scaled) in the source design</span>
+<span class="tok-fn">options</span>(survey.lonely.psu = <span class="tok-str">&quot;adjust&quot;</span>)
+
+design &lt;- <span class="tok-fn">svydesign</span>(
+  ids     = ~<span class="tok-var">stage1</span> + <span class="tok-var">stage2</span>,
+  strata  = ~<span class="tok-var">strata1</span> + <span class="tok-var">strata2</span>,
+  fpc     = ~<span class="tok-var">fpc1</span> + <span class="tok-var">fpc2</span>,
+  weights = ~<span class="tok-var">wt_final</span>,
+  data    = ahead,
+  nest    = TRUE
+)
+<span class="tok-com"># Default variance method (Taylor linearisation) matches vce(linearized)</span></pre>
+              </div>
+            </div>
+          </div>
           <h2 class="af-section-title">Data files</h2>
           <div>
             <div>

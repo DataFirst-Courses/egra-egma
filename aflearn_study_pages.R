@@ -436,6 +436,145 @@ build_join_code_stata <- function(info, row) {
   )
 }
 
+# ── Sampling: svyset (Stata) -> svydesign (R) translation ──────────────────
+.svyset_norm_ws <- function(x) {
+  x <- gsub("\u00a0", " ", x, fixed = TRUE)
+  x <- gsub("[\r\n]+", " ", x)
+  x <- gsub("\\s+", " ", x)
+  trimws(x)
+}
+
+# Parses a free-text Stata `svyset` command of the form
+# "svyset psu1 [pweight=w], strata(s1) fpc(f1) || psu2, strata(s2) ... singleunit(scaled) vce(linearized)"
+# Returns NULL when the text doesn't look like a parseable multistage svyset command
+# (e.g. placeholder notes like "No weights in dataset").
+parse_svyset_stata <- function(text) {
+  if (is.na(text) || text == "") return(NULL)
+  work <- .svyset_norm_ws(text)
+  if (!grepl("||", work, fixed = TRUE)) {
+    return(NULL)
+  }
+
+  body <- sub("(?i)^svyset\\s+", "", work, perl = TRUE)
+
+  extract1 <- function(pattern, x) {
+    m <- regmatches(x, regexpr(pattern, x, perl = TRUE))
+    if (!length(m)) return(NA_character_)
+    sub(pattern, "\\1", m, perl = TRUE)
+  }
+
+  weight_var <- extract1("\\[pweight=([^\\]]+)\\]", body)
+  singleunit_val <- extract1("singleunit\\(([^)]*)\\)", body)
+  vce_val <- extract1("vce\\(([^)]*)\\)", body)
+
+  chunks <- trimws(strsplit(body, "\\|\\|")[[1]])
+  stages <- lapply(chunks, function(ch) {
+    psu <- extract1("^([A-Za-z0-9_]+)", ch)
+    strata_val <- extract1("strata\\(([^)]*)\\)", ch)
+    if (!is.na(strata_val) && strata_val == "") strata_val <- NA_character_
+    fpc_val <- extract1("fpc\\(([^)]*)\\)", ch)
+    if (!is.na(fpc_val) && fpc_val == "") fpc_val <- NA_character_
+    list(psu = psu, strata = strata_val, fpc = fpc_val)
+  })
+  stages <- stages[!vapply(stages, function(s) is.na(s$psu), logical(1))]
+  if (length(stages) < 2) return(NULL)
+
+  list(
+    raw = text,
+    stages = stages,
+    weight = weight_var,
+    singleunit = if (!is.na(singleunit_val) && nzchar(singleunit_val)) tolower(singleunit_val) else NA_character_,
+    vce = if (!is.na(vce_val) && nzchar(vce_val)) tolower(vce_val) else NA_character_
+  )
+}
+
+.singleunit_to_lonely_psu <- function(val) {
+  if (is.na(val)) return(NA_character_)
+  switch(val,
+    scaled    = "adjust",
+    missing   = "remove",
+    certainty = "certainty",
+    centered  = "average",
+    NA_character_
+  )
+}
+
+# Syntax-highlighted (HTML) rendering of the original Stata svyset command.
+highlight_svyset_stata_html <- function(text, parsed = NULL) {
+  esc <- htmltools::htmlEscape(.svyset_norm_ws(text))
+  esc <- gsub("\\[pweight=([^\\]]+)\\]", '[pweight=<span class="tok-var">\\1</span>]', esc, perl = TRUE)
+  esc <- gsub("(strata|fpc|singleunit|vce)\\(([^)]*)\\)", '\\1(<span class="tok-var">\\2</span>)', esc, perl = TRUE)
+  esc <- gsub("\\b(svyset|strata|fpc|singleunit|vce|pweight)\\b", '<span class="tok-fn">\\1</span>', esc, perl = TRUE)
+  if (!is.null(parsed)) {
+    psu_vars <- unique(vapply(parsed$stages, function(s) s$psu, character(1)))
+    psu_vars <- psu_vars[!is.na(psu_vars)]
+    for (v in psu_vars) {
+      pat <- paste0("\\b", gsub("([.^$|?*+()\\[\\]{}\\\\])", "\\\\\\1", v, perl = TRUE), "\\b")
+      esc <- gsub(pat, sprintf('<span class="tok-var">%s</span>', v), esc, perl = TRUE)
+    }
+  }
+  esc <- gsub("\\|\\|", '<span class="tok-com">||</span>', esc, perl = TRUE)
+  esc
+}
+
+.fmt_formula_terms <- function(vars) {
+  parts <- vapply(vars, function(v) if (is.na(v)) "1" else .code_tok_var(v), character(1))
+  paste(parts, collapse = " + ")
+}
+
+build_svydesign_code_r <- function(parsed) {
+  fn <- .code_tok_fn; str_ <- .code_tok_str; var_ <- .code_tok_var
+  com <- function(x) .code_tok_com(x, "#")
+
+  ids_vars    <- vapply(parsed$stages, function(s) s$psu, character(1))
+  strata_vars <- vapply(parsed$stages, function(s) s$strata, character(1))
+  fpc_vars    <- vapply(parsed$stages, function(s) s$fpc, character(1))
+
+  has_strata   <- any(!is.na(strata_vars))
+  has_fpc      <- any(!is.na(fpc_vars))
+  mixed_strata <- has_strata && any(is.na(strata_vars))
+  mixed_fpc    <- has_fpc && any(is.na(fpc_vars))
+
+  lonely <- .singleunit_to_lonely_psu(parsed$singleunit)
+
+  lines <- c(
+    com("`ahead`: your AHEAD harmonised data frame for this assessment survey"),
+    sprintf("%s(survey)", fn("library")),
+    ""
+  )
+
+  if (!is.na(lonely)) {
+    lines <- c(
+      lines,
+      com(sprintf("singleunit(%s) in the source design", parsed$singleunit)),
+      sprintf("%s(survey.lonely.psu = %s)", fn("options"), str_(lonely)),
+      ""
+    )
+  }
+
+  design_lines <- sprintf("design &lt;- %s(", fn("svydesign"))
+  design_lines <- c(design_lines, sprintf("  ids     = ~%s,", .fmt_formula_terms(ids_vars)))
+  if (has_strata) design_lines <- c(design_lines, sprintf("  strata  = ~%s,", .fmt_formula_terms(strata_vars)))
+  if (has_fpc)    design_lines <- c(design_lines, sprintf("  fpc     = ~%s,", .fmt_formula_terms(fpc_vars)))
+  if (!is.na(parsed$weight)) {
+    design_lines <- c(design_lines, sprintf("  weights = ~%s,", var_(parsed$weight)))
+  }
+  design_lines <- c(design_lines, "  data    = ahead,", "  nest    = TRUE", ")")
+
+  lines <- c(lines, design_lines)
+
+  if (mixed_strata || mixed_fpc) {
+    lines <- c(lines, "", com("Stages without a documented stratification/fpc variable use 1 as a constant placeholder"))
+  }
+  if (!is.na(parsed$vce) && parsed$vce != "linearized") {
+    lines <- c(lines, com(sprintf("Source design specifies vce(%s); adjust the variance method accordingly", parsed$vce)))
+  } else {
+    lines <- c(lines, com("Default variance method (Taylor linearisation) matches vce(linearized)"))
+  }
+
+  paste(lines, collapse = "\n")
+}
+
 egra_subtask_copy <- function() {
   list(
     list_comp = list(
@@ -1015,6 +1154,42 @@ link_panel_html <- function(row, link_info, file_cell, link_pill) {
   )
 }
 
+sampling_design_html <- function(svyset) {
+  if (svyset == "— not specified —") {
+    return(tags$p(style = "color:#94A3B8; font-style:italic;", svyset))
+  }
+
+  parsed <- parse_svyset_stata(svyset)
+  if (is.null(parsed)) {
+    return(tags$pre(class = "af-svyset", svyset))
+  }
+
+  stata_html <- highlight_svyset_stata_html(svyset, parsed)
+  r_html <- build_svydesign_code_r(parsed)
+
+  tags$div(
+    tags$div(
+      class = "af-code-tabs",
+      tags$button(type = "button", class = "af-code-tab active", `data-lang` = "stata", "Stata"),
+      tags$button(type = "button", class = "af-code-tab", `data-lang` = "r", "R")
+    ),
+    tags$div(class = "af-code-panel active", `data-lang` = "stata",
+      tags$div(
+        class = "af-code-wrap",
+        tags$button(type = "button", class = "af-copy-btn", "Copy"),
+        tags$pre(class = "af-code", HTML(stata_html))
+      )
+    ),
+    tags$div(class = "af-code-panel", `data-lang` = "r",
+      tags$div(
+        class = "af-code-wrap",
+        tags$button(type = "button", class = "af-copy-btn", "Copy"),
+        tags$pre(class = "af-code", HTML(r_html))
+      )
+    )
+  )
+}
+
 build_study_detail_page <- function(row, present_task_ids, desc_lookup, copy_lookup,
                                     index_url, logo_uri,
                                     file_cell, link_pill, study_type_label,
@@ -1100,12 +1275,8 @@ build_study_detail_page <- function(row, present_task_ids, desc_lookup, copy_loo
           tags$div(id = "panel-sampling", class = "af-study-panel",
             tags$h2(class = "af-section-title", "Sampling"),
             tags$p(sampling),
-            tags$h2(class = "af-section-title", "svyset command"),
-            if (svyset == "— not specified —") {
-              tags$p(style = "color:#94A3B8; font-style:italic;", svyset)
-            } else {
-              tags$pre(class = "af-svyset", svyset)
-            },
+            tags$h2(class = "af-section-title", "Survey design (svyset)"),
+            sampling_design_html(svyset),
             tags$h2(class = "af-section-title", "Data files"),
             tags$div(file_cell(row$DataFile_text, row$DataFile_url)),
             tags$h2(class = "af-section-title", "Codebook"),

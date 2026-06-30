@@ -288,8 +288,39 @@ body {
         <div id="panel-sampling" class="af-study-panel">
           <h2 class="af-section-title">Sampling</h2>
           <p>Four-stage stratified cluster design: councils → schools → Grade 2 classrooms/teachers → pupils. Stage 1: 20 councils selected with probability proportional to the number of schools, after stratification by urban/rural status. Stage 2: 200 schools selected within sampled councils, stratified into high-, medium- and low-performance bands and sampled with probability proportional to Grade 2 enrolment—approximately 10 schools per council. Stage 3: one Grade 2 classroom and teacher randomly selected in each sampled school; this stage was not retained as a separate level in the survey specification. Stage 4: approximately 5–7 boys and 5–7 girls randomly selected from the sampled classroom, after stratification by gender. Harmonized sample: 402 Grade 2 classrooms/teachers and 2,266 Grade 2 pupils. Designed to support nationally representative estimates for the eligible Grade 2 pupil population after exclusions. The final pupil weight, wt_final, incorporates the selection probabilities and was calibrated to estimated regional Grade 2 enrolment by gender because actual male and female population totals were unavailable.</p>
-          <h2 class="af-section-title">svyset command</h2>
-          <pre class="af-svyset">svyset stage1 [pweight=wt_final], strata(strata1) fpc(fpc1) || stage2, strata(strata2) fpc(fpc2) || stage4, strata(strata4) fpc(fpc4) singleunit(scaled) vce(linearized)</pre>
+          <h2 class="af-section-title">Survey design (svyset)</h2>
+          <div>
+            <div class="af-code-tabs">
+              <button type="button" class="af-code-tab active" data-lang="stata">Stata</button>
+              <button type="button" class="af-code-tab" data-lang="r">R</button>
+            </div>
+            <div class="af-code-panel active" data-lang="stata">
+              <div class="af-code-wrap">
+                <button type="button" class="af-copy-btn">Copy</button>
+                <pre class="af-code"><span class="tok-fn">svyset</span> <span class="tok-var">stage1</span> [<span class="tok-fn">pweight</span>=<span class="tok-var">wt_final</span>], <span class="tok-fn">strata</span>(<span class="tok-var">strata1</span>) <span class="tok-fn">fpc</span>(<span class="tok-var">fpc1</span>) <span class="tok-com">||</span> <span class="tok-var">stage2</span>, <span class="tok-fn">strata</span>(<span class="tok-var">strata2</span>) <span class="tok-fn">fpc</span>(<span class="tok-var">fpc2</span>) <span class="tok-com">||</span> <span class="tok-var">stage4</span>, <span class="tok-fn">strata</span>(<span class="tok-var">strata4</span>) <span class="tok-fn">fpc</span>(<span class="tok-var">fpc4</span>) <span class="tok-fn">singleunit</span>(<span class="tok-var">scaled</span>) <span class="tok-fn">vce</span>(<span class="tok-var">linearized</span>)</pre>
+              </div>
+            </div>
+            <div class="af-code-panel" data-lang="r">
+              <div class="af-code-wrap">
+                <button type="button" class="af-copy-btn">Copy</button>
+                <pre class="af-code"><span class="tok-com"># `ahead`: your AHEAD harmonised data frame for this assessment survey</span>
+<span class="tok-fn">library</span>(survey)
+
+<span class="tok-com"># singleunit(scaled) in the source design</span>
+<span class="tok-fn">options</span>(survey.lonely.psu = <span class="tok-str">&quot;adjust&quot;</span>)
+
+design &lt;- <span class="tok-fn">svydesign</span>(
+  ids     = ~<span class="tok-var">stage1</span> + <span class="tok-var">stage2</span> + <span class="tok-var">stage4</span>,
+  strata  = ~<span class="tok-var">strata1</span> + <span class="tok-var">strata2</span> + <span class="tok-var">strata4</span>,
+  fpc     = ~<span class="tok-var">fpc1</span> + <span class="tok-var">fpc2</span> + <span class="tok-var">fpc4</span>,
+  weights = ~<span class="tok-var">wt_final</span>,
+  data    = ahead,
+  nest    = TRUE
+)
+<span class="tok-com"># Default variance method (Taylor linearisation) matches vce(linearized)</span></pre>
+              </div>
+            </div>
+          </div>
           <h2 class="af-section-title">Data files</h2>
           <div>
             <span style="color:#A0AEC0; font-size:12px;">—</span>

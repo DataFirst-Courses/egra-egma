@@ -280,8 +280,39 @@ Two-stage stratified cluster design: schools → Grade 3 pupils. Stage 1: 650 go
 
 2017:
 Three-stage stratified cluster design: schools → Grade 2 classrooms → pupils. Stage 1: 675 public schools selected across all 27 regions, with regions serving as strata; 25 schools were selected in each region with probability proportional to school enrolment. Stage 2: one Grade 2 classroom selected with equal probability within each sampled school, giving 675 sampled classrooms. Stage 3: pupils within each sampled classroom were stratified by gender, and approximately 6 boys and 6 girls were selected with equal probability, giving a target sample of 12 pupils per classroom. Final sample: 8,100 Grade 2 pupils from 675 schools and classrooms. Designed to support nationally representative estimates of Grade 2 pupils attending public schools.</p>
-          <h2 class="af-section-title">svyset command</h2>
-          <pre class="af-svyset">svyset stage1 [pweight=wt_stage3], strata(strata1) fpc(fpc1) || stage2, strata(strata2) fpc(fpc2) || stage3, strata(strata3) fpc(fpc3) singleunit(scaled) vce(linearized)</pre>
+          <h2 class="af-section-title">Survey design (svyset)</h2>
+          <div>
+            <div class="af-code-tabs">
+              <button type="button" class="af-code-tab active" data-lang="stata">Stata</button>
+              <button type="button" class="af-code-tab" data-lang="r">R</button>
+            </div>
+            <div class="af-code-panel active" data-lang="stata">
+              <div class="af-code-wrap">
+                <button type="button" class="af-copy-btn">Copy</button>
+                <pre class="af-code"><span class="tok-fn">svyset</span> <span class="tok-var">stage1</span> [<span class="tok-fn">pweight</span>=<span class="tok-var">wt_stage3</span>], <span class="tok-fn">strata</span>(<span class="tok-var">strata1</span>) <span class="tok-fn">fpc</span>(<span class="tok-var">fpc1</span>) <span class="tok-com">||</span> <span class="tok-var">stage2</span>, <span class="tok-fn">strata</span>(<span class="tok-var">strata2</span>) <span class="tok-fn">fpc</span>(<span class="tok-var">fpc2</span>) <span class="tok-com">||</span> <span class="tok-var">stage3</span>, <span class="tok-fn">strata</span>(<span class="tok-var">strata3</span>) <span class="tok-fn">fpc</span>(<span class="tok-var">fpc3</span>) <span class="tok-fn">singleunit</span>(<span class="tok-var">scaled</span>) <span class="tok-fn">vce</span>(<span class="tok-var">linearized</span>)</pre>
+              </div>
+            </div>
+            <div class="af-code-panel" data-lang="r">
+              <div class="af-code-wrap">
+                <button type="button" class="af-copy-btn">Copy</button>
+                <pre class="af-code"><span class="tok-com"># `ahead`: your AHEAD harmonised data frame for this assessment survey</span>
+<span class="tok-fn">library</span>(survey)
+
+<span class="tok-com"># singleunit(scaled) in the source design</span>
+<span class="tok-fn">options</span>(survey.lonely.psu = <span class="tok-str">&quot;adjust&quot;</span>)
+
+design &lt;- <span class="tok-fn">svydesign</span>(
+  ids     = ~<span class="tok-var">stage1</span> + <span class="tok-var">stage2</span> + <span class="tok-var">stage3</span>,
+  strata  = ~<span class="tok-var">strata1</span> + <span class="tok-var">strata2</span> + <span class="tok-var">strata3</span>,
+  fpc     = ~<span class="tok-var">fpc1</span> + <span class="tok-var">fpc2</span> + <span class="tok-var">fpc3</span>,
+  weights = ~<span class="tok-var">wt_stage3</span>,
+  data    = ahead,
+  nest    = TRUE
+)
+<span class="tok-com"># Default variance method (Taylor linearisation) matches vce(linearized)</span></pre>
+              </div>
+            </div>
+          </div>
           <h2 class="af-section-title">Data files</h2>
           <div>
             <span style="color:#A0AEC0; font-size:12px;">—</span>
